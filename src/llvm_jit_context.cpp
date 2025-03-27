@@ -123,6 +123,7 @@
 #include "llvm/Transforms/Scalar/LoopStrengthReduce.h"
 #include "llvm/Transforms/Scalar/LoopUnrollAndJamPass.h"
 #include "llvm/Transforms/Scalar/LoopUnrollPass.h"
+#include "llvm/Transforms/Vectorize/LoopVectorize.h"
 #endif
 
 // Disappears in LLVM 15
@@ -209,6 +210,8 @@ static void optimizeModule(llvm::Module &M)
 	// This one corresponds to a typical -O2 optimization pipeline.
 	ModulePassManager MPM =
 		PB.buildPerModuleDefaultPipeline(OptimizationLevel::O3);
+
+  MPM.addPass(LoopVectorizePass());
 
 	// Optimize the IR!
 	MPM.run(M, MAM);
