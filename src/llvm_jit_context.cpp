@@ -45,6 +45,7 @@
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
+#include <llvm/Transforms/Vectorize/LoopVectorize.h>
 
 #if LLVM_VERSION_MAJOR >= 17
 #include <llvm/ExecutionEngine/MCJIT.h>
@@ -209,7 +210,7 @@ static void optimizeModule(llvm::Module &M)
 	// Create the pass manager.
 	// This one corresponds to a typical -O2 optimization pipeline.
 	ModulePassManager MPM =
-		PB.buildPerModuleDefaultPipeline(OptimizationLevel::O3);
+		PB.buildPerModuleDefaultPipeline(OptimizationLevel::O2);
 
   MPM.addPass(LoopVectorizePass());
 
