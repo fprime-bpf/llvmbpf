@@ -174,6 +174,8 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	llvm::Argument *mem_len = bpf_func->getArg(1);
 
 	std::vector<Value *> regs;
+	std::vector<Value *> fregs; /* floating point registers */
+
 	std::vector<BasicBlock *> allBlocks;
 	// Stack used to save return address and saved registers
 	Value *callStack, *callItemCnt;
@@ -188,7 +190,11 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			regs.push_back(builder.CreateAlloca(
 				builder.getInt64Ty(), nullptr,
 				"r" + std::to_string(i)));
+			fregs.push_back(builder.CreateAlloca(
+				builder.getFloatTy(), nullptr,
+				"f" + std::to_string(i)));
 		}
+
 		// Create stack
 		auto stackBegin = builder.CreateAlloca(
 			builder.getInt64Ty(),
