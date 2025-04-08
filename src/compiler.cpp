@@ -3,6 +3,7 @@
  * Copyright (c) 2022, eunomia-bpf org
  * All rights reserved.
  */
+#include <iostream>
 #include "llvm/IR/Argument.h"
 #include "llvm_jit_context.hpp"
 #include "ebpf_inst.h"
@@ -332,6 +333,51 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 					std::to_string(pc),
 				llvm::inconvertibleErrorCode());
 		}
+
+#define EBPF_OP_FMOV
+
+		bool isFPU = false;
+		switch (inst.offset) {
+		case 2: {
+			std::cout << "FP operation detected\n";
+			isFPU = true;
+			switch (inst.opcode) {
+			case 0: {
+				std::cout << "FADD\n";
+				break;
+			}
+			case 0xb0:
+			case 0xb1:
+			case 0xb2:
+			case 0xb3:
+			case 0xb4:
+			case 0xb5:
+			case 0xb6:
+			case 0xb7:
+			case 0xb8:
+			case 0xb9:
+			case 0xba:
+			case 0xbb:
+			case 0xbc:
+			case 0xbd:
+			case 0xbe:
+			case 0xbf: {
+				std::cout << "FMOV\n";
+				Value *src_val = emitLoadFPUSource(
+					inst, &fregs[0], builder);
+				Value *result = src_val;
+
+				emitStoreFPUResult(inst, &fregs[0], builder,
+						   result);
+				break;
+			}
+			}
+		}
+		}
+
+		if (isFPU)
+			continue;
+
 		switch (inst.opcode) {
 			// ALU
 		case EBPF_OP_ADD64_IMM:
@@ -376,8 +422,8 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		case EBPF_OP_DIV_IMM:
 		case EBPF_OP_DIV64_REG:
 		case EBPF_OP_DIV_REG: {
-			// Set dst to zero if trying to being divided by
-			// zero
+			// Set dst to zero if trying to being
+			// divided by zero
 			{
 				emitALUWithDstAndSrc(inst, builder, &regs[0], [&](Value *dst_val, Value *src_val) {
 					bool is_64 = is_alu64(inst);
@@ -395,17 +441,21 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 						if (is_sdiv) {
 							/**
 							  If
-is_64 is true, src_val will be zero-extended to 64-bit. According to
-eBPF docs, it should actually be sign-extended to 64-bit, so we perform
-this conversion.
+is_64 is true, src_val will be zero-extended to 64-bit.
+According to eBPF docs, it should actually be sign-extended to
+64-bit, so we perform this conversion.
 							 */
 							src_val = builder.CreateSExt(
 								builder.CreateTrunc(
 									src_val,
 									builder.getInt32Ty()),
 								builder.getInt64Ty());
-							// dst = I64_MIN and src
-							// = -1? Overflow!
+							// dst =
+							// I64_MIN
+							// and
+							// src
+							// = -1?
+							// Overflow!
 							auto overflow_cond = builder.CreateAnd(
 								{ builder.CreateCmp(
 									  CmpInst::Predicate::
@@ -434,8 +484,12 @@ this conversion.
 						}
 					} else {
 						if (is_sdiv) {
-							// dst = I64_MIN and src
-							// = -1? Overflow!
+							// dst =
+							// I64_MIN
+							// and
+							// src
+							// = -1?
+							// Overflow!
 							auto overflow_cond = builder.CreateAnd(
 								{ builder.CreateCmp(
 									  CmpInst::Predicate::
@@ -596,13 +650,16 @@ this conversion.
 		case EBPF_OP_MOV_IMM:
 		case EBPF_OP_MOV64_REG:
 		case EBPF_OP_MOV_REG: {
+			std::cout << "MOV\n";
 			bool is_mov_sx = inst.offset != 0;
 			Value *src_val =
 				emitLoadALUSource(inst, &regs[0], builder);
 			Value *result;
 			if (is_mov_sx) {
-				// for alu64: dst = (u64)(s64)(sOFFSET)src
-				// for alu(32): dst = (u32)(s32)(sOFFSET)src
+				// for alu64: dst =
+				// (u64)(s64)(sOFFSET)src for
+				// alu(32): dst =
+				// (u32)(s32)(sOFFSET)src
 				Value *extended_result;
 				if (inst.offset == 8) {
 					extended_result = builder.CreateSExt(
@@ -633,8 +690,9 @@ this conversion.
 						llvm::inconvertibleErrorCode());
 				}
 				if (is_alu64(inst)) {
-					// convert it to u64  is not needed,
-					// llvm ir uses unsigned numbers
+					// convert it to u64  is
+					// not needed, llvm ir
+					// uses unsigned numbers
 					result = builder.CreateCast(
 						Instruction::CastOps::SExt,
 						extended_result,
@@ -705,6 +763,7 @@ this conversion.
 		}
 		case EBPF_OP_STW:
 		case EBPF_OP_STXW: {
+			std::cout << "STX\n";
 			emitStore(inst, builder, &regs[0],
 				  builder.getInt32Ty());
 			break;
@@ -739,8 +798,9 @@ this conversion.
 		// LD
 		// Keep compatiblity to ubpf
 		case EBPF_OP_LDDW: {
-			// ubpf only supports EBPF_OP_LDDW in instruction class
-			// EBPF_CLS_LD, so do us
+			// ubpf only supports EBPF_OP_LDDW in
+			// instruction class EBPF_CLS_LD, so do
+			// us
 			auto size = inst.opcode & 0x18;
 			auto mode = inst.opcode & 0xe0;
 			if (size != 0x18 || mode != 0x00) {
@@ -810,7 +870,8 @@ this conversion.
 				} else {
 					SPDLOG_INFO(
 						"map_by_fd is called in eBPF code, but is not provided, will use the default behavior");
-					// Default: returns the input value
+					// Default: returns the
+					// input value
 					mapPtr = (uint64_t)inst.imm;
 				}
 				if (patch_map_val_at_compile_time) {
@@ -899,7 +960,8 @@ this conversion.
 				} else {
 					SPDLOG_INFO(
 						"map_by_idx is called in eBPF code, but it's not provided, will use the default behavior");
-					// Default: returns the input value
+					// Default: returns the
+					// input value
 					builder.CreateStore(
 						builder.getInt64(
 							(int64_t)inst.imm),
@@ -917,7 +979,8 @@ this conversion.
 				} else {
 					SPDLOG_DEBUG(
 						"map_by_idx is called in eBPF code, but it's not provided, will use the default behavior");
-					// Default: returns the input value
+					// Default: returns the
+					// input value
 					mapPtr = (int64_t)inst.imm;
 				}
 				if (patch_map_val_at_compile_time) {
@@ -996,14 +1059,15 @@ this conversion.
 		}
 			// Call helper or local function
 		case EBPF_OP_CALL:
-			// Work around for clang producing instructions
-			// that we don't support
+			// Work around for clang producing
+			// instructions that we don't support
 		case EBPF_OP_CALL | 0x8: {
 			// Call local function
 			if (inst.src == 0x1) {
-				// Each call will put five 8byte integer
-				// onto the call stack the most top one
-				// is the return address, followed by
+				// Each call will put five 8byte
+				// integer onto the call stack
+				// the most top one is the
+				// return address, followed by
 				// r6, r7, r8, r9
 				Value *nextPos = builder.CreateAdd(
 					builder.CreateLoad(builder.getInt64Ty(),
@@ -1063,6 +1127,7 @@ this conversion.
 			break;
 		}
 		case EBPF_OP_EXIT: {
+			std::cout << "EXIT\n";
 			builder.CreateCondBr(
 				builder.CreateICmpEQ(
 					builder.CreateLoad(builder.getInt64Ty(),
@@ -1321,6 +1386,16 @@ this conversion.
 			builder.CreateBr(allBlocks[i + 1]);
 		}
 	}
+
+	// For every basic block, print each instruction from its iterator
+	for (size_t i = 0; i < allBlocks.size(); i++) {
+		auto &currBlk = allBlocks[i];
+		std::string str;
+		llvm::raw_string_ostream rso(str);
+		currBlk->print(rso);
+		printf("%s\n", str.c_str());
+	}
+
 	std::string buffer;
 	llvm::raw_string_ostream stream(buffer);
 	if (verifyModule(*jitModule, &stream)) {

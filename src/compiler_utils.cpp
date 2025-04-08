@@ -1,7 +1,33 @@
 #include "compiler_utils.hpp"
+#include <bit>
 
 namespace bpftime
 {
+/// Get the source representation of certain FPU operands
+llvm::Value *emitLoadFPUSource(const ebpf_inst &inst, llvm::Value **regs,
+			       llvm::IRBuilder<> &builder)
+{
+	/* if 1, use register, else imm */
+	int srcTy = inst.opcode & 0x08;
+
+	// int code = inst.opcode & 0xf0;
+	llvm::Value *src_val;
+
+	if (srcTy == EBPF_SRC_IMM) {
+		/* bit_cast is introduced in c++20 - previous versions might
+		 * have to use reinterpret_cast, although I hear it's condemned
+		 */
+		float flt = std::bit_cast<float>(inst.imm);
+
+		/* convert c++ float to llvm float */
+		src_val = llvm::ConstantFP::get(builder.getFloatTy(), flt);
+	} else {
+		src_val = builder.CreateLoad(builder.getFloatTy(),
+					     regs[inst.src]);
+	}
+	return src_val;
+}
+
 /// Get the source representation of certain ALU operands
 llvm::Value *emitLoadALUSource(const ebpf_inst &inst, llvm::Value **regs,
 			       llvm::IRBuilder<> &builder)
@@ -40,6 +66,12 @@ llvm::Value *emitLoadALUDest(const ebpf_inst &inst, llvm::Value **regs,
 	} else {
 		return builder.CreateLoad(builder.getInt32Ty(), regs[inst.dst]);
 	}
+}
+
+void emitStoreFPUResult(const ebpf_inst &inst, llvm::Value **fregs,
+			llvm::IRBuilder<> &builder, llvm::Value *result)
+{
+	builder.CreateStore(result, fregs[inst.dst]);
 }
 
 void emitStoreALUResult(const ebpf_inst &inst, llvm::Value **regs,

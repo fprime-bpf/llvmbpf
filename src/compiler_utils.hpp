@@ -48,6 +48,12 @@ static inline bool is_alu64(const ebpf_inst &insn)
 	return (insn.opcode & 0x07) == EBPF_CLS_ALU64;
 }
 
+/// Get the source representation of certain FPU operands
+llvm::Value *emitLoadFPUSource(const ebpf_inst &inst, llvm::Value **regs,
+			       llvm::IRBuilder<> &builder);
+void emitStoreFPUResult(const ebpf_inst &inst, llvm::Value **regs,
+			llvm::IRBuilder<> &builder, llvm::Value *result);
+
 /// Get the source representation of certain ALU operands
 llvm::Value *emitLoadALUSource(const ebpf_inst &inst, llvm::Value **regs,
 			       llvm::IRBuilder<> &builder);
