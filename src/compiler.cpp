@@ -337,8 +337,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 #define EBPF_OP_FMOV
 
 		bool isFPU = false;
-		switch (inst.offset) {
-		case 2: {
+		if (inst.offset & 0x2) {
 			std::cout << "FP operation detected\n";
 			isFPU = true;
 			switch (inst.opcode) {
@@ -371,8 +370,23 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 						   result);
 				break;
 			}
+
+			default: {
+				fprintf(stderr,
+					"\x1b[31m" /* ansi RED */
+					"BAD"
+					"\x1b[0m" /* ansi RESET */
+					": unhandled floating point op:\n"
+					"opcode: 0x%02x______________\n"
+					"dst:    0x__%01x_____________\n"
+					"src:    0x___%01x____________\n"
+					"offset: 0x____%04x________\n"
+					"imm:    0x________%08x\n",
+					inst.opcode, inst.dst, inst.src,
+					inst.offset, inst.imm);
+				exit(1);
 			}
-		}
+			}
 		}
 
 		if (isFPU)
