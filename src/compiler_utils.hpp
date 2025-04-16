@@ -79,6 +79,10 @@ void emitStore(const ebpf_inst &inst, llvm::IRBuilder<> &builder,
 	       llvm::Value **regs, llvm::IntegerType *destTy);
 
 std::tuple<llvm::Value *, llvm::Value *, llvm::Value *>
+emitJmpLoadSrcAndDstAndZeroFPU(const ebpf_inst &inst, llvm::Value **regs,
+			       llvm::IRBuilder<> &builder);
+
+std::tuple<llvm::Value *, llvm::Value *, llvm::Value *>
 emitJmpLoadSrcAndDstAndZero(const ebpf_inst &inst, llvm::Value **regs,
 			    llvm::IRBuilder<> &builder);
 
@@ -101,6 +105,12 @@ void emitLDXStoringResult(llvm::IRBuilder<> &builder, llvm::Value **regs,
 			  const ebpf_inst &inst, llvm::Value *result);
 void emitLoadX(llvm::IRBuilder<> &builder, llvm::Value **regs,
 	       const ebpf_inst &inst, llvm::IntegerType *srcTy);
+
+llvm::Expected<int> emitCondJmpWithDstAndSrcFPU(
+	llvm::IRBuilder<> &builder, uint16_t pc, const ebpf_inst &inst,
+	const std::map<uint16_t, llvm::BasicBlock *> &instBlocks,
+	llvm::Value **regs,
+	std::function<llvm::Value *(llvm::Value *, llvm::Value *)> func);
 
 llvm::Expected<int> emitCondJmpWithDstAndSrc(
 	llvm::IRBuilder<> &builder, uint16_t pc, const ebpf_inst &inst,

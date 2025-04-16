@@ -196,6 +196,31 @@ void emitStore(const ebpf_inst &inst, llvm::IRBuilder<> &builder,
 }
 
 std::tuple<llvm::Value *, llvm::Value *, llvm::Value *>
+emitJmpLoadSrcAndDstAndZeroFPU(const ebpf_inst &inst, llvm::Value **regs,
+			       llvm::IRBuilder<> &builder)
+{
+	int regSrc = (inst.opcode & 0x8) == 0x8;
+	using namespace llvm;
+	Value *src, *dst, *zero;
+	if ((inst.opcode & 0x07) == 0x06) {
+		// JMP32
+		if (regSrc) {
+			src = builder.CreateLoad(builder.getFloatTy(),
+						 regs[inst.src]);
+		} else {
+			float flt = std::bit_cast<float>(inst.imm);
+			src = llvm::ConstantFP::get(builder.getFloatTy(), flt);
+		}
+		dst = builder.CreateLoad(builder.getFloatTy(), regs[inst.dst]);
+		zero = llvm::ConstantFP::get(builder.getFloatTy(), 0);
+	} else {
+		SPDLOG_ERROR("unreachable, doubles not supported\n");
+		exit(1234);
+	}
+	return { src, dst, zero };
+}
+
+std::tuple<llvm::Value *, llvm::Value *, llvm::Value *>
 emitJmpLoadSrcAndDstAndZero(const ebpf_inst &inst, llvm::Value **regs,
 			    llvm::IRBuilder<> &builder)
 {
@@ -281,7 +306,7 @@ llvm::Expected<std::pair<llvm::BasicBlock *, llvm::BasicBlock *> >
 localJmpDstAndNextBlk(uint16_t pc, const ebpf_inst &inst,
 		      const std::map<uint16_t, llvm::BasicBlock *> &instBlocks)
 {
-	if (auto dst = loadJmpDstBlock(pc, inst, instBlocks, true); dst) {
+	if (auto dst = loadJmpDstBlock(pc, inst, instBlocks, false); dst) {
 		if (auto next = loadJmpNextBlock(pc, inst, instBlocks); next) {
 			return std::make_pair(dst.get(), next.get());
 		} else {
@@ -318,6 +343,23 @@ void emitLoadX(llvm::IRBuilder<> &builder, llvm::Value **regs,
 	Value *addr = emitLDXLoadingAddr(builder, &regs[0], inst);
 	Value *result = builder.CreateLoad(srcTy, addr);
 	emitLDXStoringResult(builder, &regs[0], inst, result);
+}
+
+llvm::Expected<int> emitCondJmpWithDstAndSrcFPU(
+	llvm::IRBuilder<> &builder, uint16_t pc, const ebpf_inst &inst,
+	const std::map<uint16_t, llvm::BasicBlock *> &instBlocks,
+	llvm::Value **regs,
+	std::function<llvm::Value *(llvm::Value *, llvm::Value *)> func)
+{
+	if (auto ret = localJmpDstAndNextBlk(pc, inst, instBlocks); ret) {
+		auto [dstBlk, nextBlk] = ret.get();
+		auto [src, dst, _] =
+			emitJmpLoadSrcAndDstAndZeroFPU(inst, &regs[0], builder);
+		builder.CreateCondBr(func(dst, src), dstBlk, nextBlk);
+		return 0;
+	} else {
+		return ret.takeError();
+	}
 }
 
 llvm::Expected<int> emitCondJmpWithDstAndSrc(

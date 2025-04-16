@@ -345,13 +345,70 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 				std::cout << "FADD\n";
 				break;
 			}
+				/* if 3 LSB of opcode = 6 -> JMP32 */
+				/* if 4th LSB bit of opcode = 1 -> imm */
+			case 0x16:
+			case 0x26:
+			case 0x36:
+			case 0x56:
+			case 0x66:
+			case 0x76:
+			case 0xa6:
+			case 0xb6:
+			case 0xc6:
+			case 0xd6:
+			case 0x1e:
+			case 0x2e:
+			case 0x3e:
+			case 0x5e:
+			case 0x6e:
+			case 0x7e:
+			case 0xae:
+			case 0xbe:
+			case 0xce:
+			case 0xde: {
+				switch ((inst.opcode & 0xf0) >> 4) {
+				case 0x1: {
+					std::cout << "Jump if ==\n";
+
+					break;
+				}
+				case 0x2: {
+					std::cout << "jump if >\n";
+					auto ret = emitCondJmpWithDstAndSrcFPU(
+						builder, pc, inst, instBlocks,
+						&fregs[0],
+						[&](auto dst, auto src) {
+							return builder
+								.CreateFCmpOGT(
+									dst,
+									src);
+						});
+
+					/* Can be replaced by HANDLE_ERR */
+					if (!ret)
+						return ret.takeError();
+
+					break;
+				}
+				default: {
+					std::cout << "(" << inst.opcode
+						  << " & 0xf0 >> 4) == "
+						  << ((inst.opcode & 0xf0) >> 4)
+						  << std::endl;
+					std::cout << "BADDD\n";
+					goto badfloat;
+				}
+				}
+				std::cout << "FJMP\n";
+				break;
+			}
 			case 0xb0:
 			case 0xb1:
 			case 0xb2:
 			case 0xb3:
 			case 0xb4:
 			case 0xb5:
-			case 0xb6:
 			case 0xb7:
 			case 0xb8:
 			case 0xb9:
@@ -359,7 +416,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			case 0xbb:
 			case 0xbc:
 			case 0xbd:
-			case 0xbe:
+			// case 0xbe:
 			case 0xbf: {
 				std::cout << "FMOV\n";
 				Value *src_val = emitLoadFPUSource(
@@ -372,10 +429,13 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			}
 
 			default: {
+			badfloat:
 				fprintf(stderr,
-					"\x1b[31m" /* ansi RED */
+					"\x1b[31m" /* ansi RED
+						    */
 					"BAD"
-					"\x1b[0m" /* ansi RESET */
+					"\x1b[0m" /* ansi RESET
+						   */
 					": unhandled floating point op:\n"
 					"opcode: 0x%02x______________\n"
 					"dst:    0x__%01x_____________\n"
@@ -1401,7 +1461,8 @@ According to eBPF docs, it should actually be sign-extended to
 		}
 	}
 
-	// For every basic block, print each instruction from its iterator
+	// For every basic block, print each instruction from
+	// its iterator
 	for (size_t i = 0; i < allBlocks.size(); i++) {
 		auto &currBlk = allBlocks[i];
 		std::string str;
