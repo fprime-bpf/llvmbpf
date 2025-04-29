@@ -339,9 +339,9 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 #define FST (0x02)
 #define FSTX (0x03)
 #define FALU (0x04)
-#define FJMP32 (0x06)
+#define FJMP (0x05)
 
-/* arithmetic opcodes */
+/* arithmetic operations */
 #define FADD (0x00)
 #define FSUB (0x10)
 #define FMUL (0x20)
@@ -350,7 +350,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 #define FMEM (0xa0) // for LDX, ST(X), equal to XOR for ALU instructions
 #define FMOV (0xb0)
 
-/* jump opcodes */
+/* jump operations */
 #define FJEQ (0x10)
 #define FJOGT (0x2)
 #define FJOGE (0x3)
@@ -365,6 +365,49 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 /* src */
 #define FIMM (0x00)
 #define FREG (0x08)
+
+/* size */
+#define FWORD (0x00) // duotronic only supports words
+
+/* ALU instructions */
+#define DUO_OP_FADD_IMM (FADD | FIMM | FALU)
+#define DUO_OP_FADD_REG (FADD | FREG | FALU)
+#define DUO_OP_FSUB_IMM (FSUB | FIMM | FALU)
+#define DUO_OP_FSUB_REG (FSUB | FREG | FALU)
+#define DUO_OP_FMUL_IMM (FMUL | FIMM | FALU)
+#define DUO_OP_FMUL_REG (FMUL | FREG | FALU)
+#define DUO_OP_FDIV_IMM (FDIV | FIMM | FALU)
+#define DUO_OP_FDIV_REG (FDIV | FREG | FALU)
+#define DUO_OP_FNEG (FNEG | 0x00 | FALU) // FNEG uses no source
+#define DUO_OP_FMOV_IMM (FMOV | FIMM | FALU)
+#define DUO_OP_FMOV_REG (FMOV | FREG | FALU)
+
+/* Load+Store instructions */
+#define DUO_OP_FLDX (FMEM | FWORD | FLDX)
+#define DUO_OP_FST (FMEM | FWORD | FST)
+#define DUO_OP_FSTX (FMEM | FWORD | FSTX)
+
+/* Jump instructions */
+#define DUO_OP_FJEQ_IMM (FJEQ | FIMM | FJMP)
+#define DUO_OP_FJEQ_REG (FJEQ | FREG | FJMP)
+#define DUO_OP_FJOGT_IMM (FJOGT | FIMM | FJMP)
+#define DUO_OP_FJOGT_REG (FJOGT | FREG | FJMP)
+#define DUO_OP_FJOGE_IMM (FJOGE | FIMM | FJMP)
+#define DUO_OP_FJOGE_REG (FJOGE | FREG | FJMP)
+#define DUO_OP_FJNE_IMM (FJNE | FIMM | FJMP)
+#define DUO_OP_FJNE_REG (FJNE | FREG | FJMP)
+#define DUO_OP_FJUGT_IMM (FJUGT | FIMM | FJMP)
+#define DUO_OP_FJUGT_REG (FJUGT | FREG | FJMP)
+#define DUO_OP_FJUGE_IMM (FJUGE | FIMM | FJMP)
+#define DUO_OP_FJUGE_REG (FJUGE | FREG | FJMP)
+#define DUO_OP_FJOLT_IMM (FJOLT | FIMM | FJMP)
+#define DUO_OP_FJOLT_REG (FJOLT | FREG | FJMP)
+#define DUO_OP_FJOLE_IMM (FJOLE | FIMM | FJMP)
+#define DUO_OP_FJOLE_REG (JFOLE | FREG | FJMP)
+#define DUO_OP_FJULT_IMM (FJULT | FIMM | FJMP)
+#define DUO_OP_FJULT_REG (FJULT | FREG | FJMP)
+#define DUO_OP_FJULE_IMM (FJULE | FIMM | FJMP)
+#define DUO_OP_FJULE_REG (FJULE | FREG | FJMP)
 
 		bool isFPU = false;
 		if (inst.offset & 0x2) {
