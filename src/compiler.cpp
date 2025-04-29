@@ -334,7 +334,37 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 				llvm::inconvertibleErrorCode());
 		}
 
-#define EBPF_OP_FMOV
+/* instruction classes */
+#define FLDX (0x01)
+#define FST (0x02)
+#define FSTX (0x03)
+#define FALU (0x04)
+#define FJMP32 (0x06)
+
+/* arithmetic opcodes */
+#define FADD (0x00)
+#define FSUB (0x10)
+#define FMUL (0x20)
+#define FDIV (0x30)
+#define FNEG (0x80)
+#define FMEM (0xa0) // for LDX, ST(X), equal to XOR for ALU instructions
+#define FMOV (0xb0)
+
+/* jump opcodes */
+#define FJEQ (0x10)
+#define FJOGT (0x2)
+#define FJOGE (0x3)
+#define FJNE (0x5)
+#define FJUGT (0x6)
+#define FJUGE (0x7)
+#define FJOLT (0xa)
+#define FJOLE (0xb0)
+#define FJULT (0xc0)
+#define FJULE (0xd0)
+
+/* src */
+#define FIMM (0x00)
+#define FREG (0x08)
 
 		bool isFPU = false;
 		if (inst.offset & 0x2) {
