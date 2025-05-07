@@ -71,7 +71,9 @@ endif()
 
 include(FetchContent)
 
-if(NOT DEFINED SPDLOG_INCLUDE)
+if(USE_SYSTEM_SPDLOG)
+    find_package(spdlog CONFIG REQUIRED)
+elseif(NOT DEFINED SPDLOG_INCLUDE)
     message(INFO " Adding spdlog seperately..")
 
     # spdlog
@@ -84,8 +86,6 @@ if(NOT DEFINED SPDLOG_INCLUDE)
 
     # Make the spdlog target available
     FetchContent_MakeAvailable(spdlog)
-else()
-    find_package(spdlog CONFIG REQUIRED)
 endif()
 
 # if BPFTIME_LLVM_JIT is set, then it's built in the bpftime project.
