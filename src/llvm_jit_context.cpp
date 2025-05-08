@@ -152,7 +152,6 @@
 #include <llvm/ExecutionEngine/JITSymbol.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/Transforms/IPO.h>
-#include <llvm/Support/Host.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <memory>
 #include <pthread.h>
@@ -210,9 +209,7 @@ static void optimizeModule(llvm::Module &M)
 	// Create the pass manager.
 	// This one corresponds to a typical -O2 optimization pipeline.
 	ModulePassManager MPM =
-		PB.buildPerModuleDefaultPipeline(OptimizationLevel::O2);
-
-  MPM.addPass(LoopVectorizePass());
+		PB.buildPerModuleDefaultPipeline(OptimizationLevel::O3);
 
 	// Optimize the IR!
 	MPM.run(M, MAM);
@@ -467,8 +464,6 @@ llvm_bpf_jit_context::create_and_initialize_lljit_instance()
 		jit->getExecutionSession().intern("__aeabi_unwind_cpp_pr1"),
 		JITEvaluatedSymbol::fromPointer(__aeabi_unwind_cpp_pr1));
 #endif
-	auto define_extSymbols_err =
-		mainDylib.define(absoluteSymbols(extSymbols));
 	if (auto err = mainDylib.define(absoluteSymbols(extSymbols)); !err) {
 		SPDLOG_DEBUG("LLVM-JIT: failed to define external symbols");
 	}

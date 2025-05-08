@@ -11,3 +11,10 @@ bpftime_add_executable(maps-example
 
 add_dependencies(maps-example llvmbpf_vm spdlog::spdlog)
 target_link_libraries(maps-example llvmbpf_vm)
+
+bpftime_add_executable(nccscore
+    ./nccscore.cpp
+)
+
+add_dependencies(nccscore llvmbpf_vm spdlog::spdlog)
+target_link_libraries(nccscore llvmbpf_vm)
