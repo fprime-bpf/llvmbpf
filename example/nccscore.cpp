@@ -51,7 +51,7 @@ const unsigned char bpf_match_ncc_score[] = "\x7b\x1a\xf8\xff\x00\x00\x00\x00" /
                                             "\x18\x01\x00\x00\x00\x00\x00\x00" // r1 = 0x0 ll
                                             "\x00\x00\x00\x00\x00\x00\x00\x00"
                                             "\x79\x11\x00\x00\x00\x00\x00\x00" // r1 = *(u64 *)(r1 + 0x0)
-                                            "\x8d\x01\x00\x00\x00\x00\x00\x00" // callx r1
+                                            "\x85\x00\x00\x00\x01\x00\x00\x00" // callx r1
                                             "\x7b\x0a\xd8\xff\x00\x00\x00\x00" // *(u64 *)(r10 - 0x28) = r0
                                             "\xb4\x01\x00\x00\x00\x00\x00\x00" // w1 = 0x0
                                             "\x63\x1a\xd4\xff\x00\x00\x00\x00" // *(u32 *)(r10 - 0x2c) = w1
