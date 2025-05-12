@@ -21,7 +21,6 @@ uint8_t ncc_score_match_img[] = {0x00, 0x22, 0x22, 0x33, 0x44,
 
 uint64_t nccscore_get_match_image(uint64_t a, uint64_t _b, uint64_t _c,
                                   uint64_t _d, uint64_t _e) {
-  std::cout << "get_match_image called" << std::endl;
   // Send a pointer to example image match to match against
   return (uint64_t)&ncc_score_match_img;
 }
@@ -120,6 +119,7 @@ const unsigned char bpf_match_ncc_score[] = "\x7b\x1a\xf8\xff\x00\x00\x00\x00" /
 
 int main(int argc, char *argv[]) {
   uint64_t res = 0;
+  int err = 0;
   llvmbpf_vm vm;
 
   printf("running ebpf prog, code len: %zd\n", sizeof(bpf_match_ncc_score) - 1);
@@ -133,7 +133,7 @@ int main(int argc, char *argv[]) {
     exit(1);
   } else {
     std::chrono::duration<double, std::milli> load_time = vm_load_end - vm_load_start;
-    std::cout << "vm load code time: " << load_time.count() << std::endl;
+    std::cout << "vm load code time: " << load_time.count() << " ms" << std::endl;
   }
 
   auto compile_start = std::chrono::high_resolution_clock::now();
@@ -147,11 +147,12 @@ int main(int argc, char *argv[]) {
     exit(1);
   } else {
     std::chrono::duration<double, std::milli> compile_time = compile_end - compile_start;
-    std::cout << "vm load code time: " << compile_time.count() << std::endl;
+    std::cout << "vm compile time: " << compile_time.count() << " ms" << std::endl;
   }
 
   auto exec_start = std::chrono::high_resolution_clock::now();
-  int err = vm.exec(&search_img, sizeof(search_img), res);
+  for (int i = 0; i < 100000; i++)
+    err = vm.exec(&search_img, sizeof(search_img), res);
   auto exec_end = std::chrono::high_resolution_clock::now();
 
   if (err != 0) {
@@ -159,7 +160,7 @@ int main(int argc, char *argv[]) {
     exit(1);
   } else {
     std::chrono::duration<double, std::milli> exec_time = exec_end - exec_start;
-    std::cout << "vm load code time: " << exec_time.count() << std::endl;
+    std::cout << "vm run time: " << exec_time.count() << " ms" << std::endl;
   }
 
   printf("res = %" PRIu64 "\n", res);
