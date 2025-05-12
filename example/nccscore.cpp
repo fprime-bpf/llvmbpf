@@ -1,6 +1,8 @@
 #include "llvmbpf.hpp"
 #include <cassert>
+#include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <inttypes.h>
 #include <iostream>
 #include <ostream>
@@ -8,7 +10,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 
 #include <llvm/ExecutionEngine/MCJIT.h>
@@ -123,27 +124,44 @@ int main(int argc, char *argv[]) {
 
   printf("running ebpf prog, code len: %zd\n", sizeof(bpf_match_ncc_score) - 1);
 
+  auto vm_load_start = std::chrono::high_resolution_clock::now();
   res = vm.load_code(bpf_match_ncc_score, sizeof(bpf_match_ncc_score) - 1);
+  auto vm_load_end = std::chrono::high_resolution_clock::now();
+
   if (res) {
     fprintf(stderr, "Failed to load: %s\n", vm.get_error_message().c_str());
     exit(1);
+  } else {
+    std::chrono::duration<double, std::milli> load_time = vm_load_end - vm_load_start;
+    std::cout << "vm load code time: " << load_time.count() << std::endl;
   }
 
+  auto compile_start = std::chrono::high_resolution_clock::now();
   vm.register_external_function(1, "get_match_image",
                                 (void *)nccscore_get_match_image);
   auto func = vm.compile();
+  auto compile_end = std::chrono::high_resolution_clock::now();
+
   if (!func) {
     fprintf(stderr, "Failed to compile: %s\n", vm.get_error_message().c_str());
     exit(1);
+  } else {
+    std::chrono::duration<double, std::milli> compile_time = compile_end - compile_start;
+    std::cout << "vm load code time: " << compile_time.count() << std::endl;
   }
 
+  auto exec_start = std::chrono::high_resolution_clock::now();
   int err = vm.exec(&search_img, sizeof(search_img), res);
+  auto exec_end = std::chrono::high_resolution_clock::now();
+
   if (err != 0) {
     fprintf(stderr, "Failed to exec.");
     exit(1);
+  } else {
+    std::chrono::duration<double, std::milli> exec_time = exec_end - exec_start;
+    std::cout << "vm load code time: " << exec_time.count() << std::endl;
   }
 
   printf("res = %" PRIu64 "\n", res);
   return 0;
 }
-
