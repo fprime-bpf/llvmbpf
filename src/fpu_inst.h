@@ -2,6 +2,9 @@
 #ifndef FPU_INST_H
 #define FPU_INST_H
 
+#include <stdint.h>
+#include "ebpf_inst.h"
+
 /* instruction classes */
 #define FLDX (0x01)
 #define FST (0x02)
@@ -76,5 +79,10 @@
 #define DUO_OP_FJULT_REG (FJULT | FREG | FJMP)
 #define DUO_OP_FJULE_IMM (FJULE | FIMM | FJMP)
 #define DUO_OP_FJULE_REG (FJULE | FREG | FJMP)
+
+inline uint8_t duo_opcode(const ebpf_inst &inst)
+{
+	return inst.opcode & 0xf0;
+}
 
 #endif // FPU_INST_H

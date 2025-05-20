@@ -379,43 +379,16 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			case DUO_OP_FJULT_REG:
 			case DUO_OP_FJULE_IMM:
 			case DUO_OP_FJULE_REG: {
-				switch ((inst.opcode & 0xf0) >> 4) {
-				case 0x1: {
-					std::cout << "Jump if ==\n";
+				auto f_cmp_func = get_fcmp_func(inst, builder);
 
-					break;
-				}
-				case 0x2: {
-					std::cout << "jump if >\n";
-					auto ret = emitCondJmpWithDstAndSrcFPU(
-						builder, pc, inst, instBlocks,
-						&fregs[0],
-						[&](auto dst, auto src) {
-							return builder
-								.CreateFCmpOGT(
-									dst,
-									src);
-						});
+				auto ret = emitCondJmpWithDstAndSrcFPU(
+					builder, pc, inst, instBlocks,
+					&fregs[0], f_cmp_func);
 
-					/* Can be replaced by HANDLE_ERR */
-					if (!ret) {
-						std::cout << "error\n";
-						return ret.takeError();
-					}
-
-					std::cout << "breaking\n";
-					break;
-				}
-				default: {
-					std::cout << "(" << inst.opcode
-						  << " & 0xf0 >> 4) == "
-						  << ((inst.opcode & 0xf0) >> 4)
-						  << std::endl;
-					std::cout << "BADDD\n";
-					goto badfloat;
-				}
-				}
-				std::cout << "FJMP\n";
+				/* Can be replaced by HANDLE_ERR */
+				if (!ret)
+					return ret.takeError();
+				break;
 				break;
 			}
 
@@ -1190,7 +1163,6 @@ According to eBPF docs, it should actually be sign-extended to
 			break;
 		}
 		case EBPF_OP_EXIT: {
-			std::cout << "EXIT\n";
 			builder.CreateCondBr(
 				builder.CreateICmpEQ(
 					builder.CreateLoad(builder.getInt64Ty(),

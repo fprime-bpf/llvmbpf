@@ -29,6 +29,69 @@ llvm::Value *emitLoadFPUSource(const ebpf_inst &inst, llvm::Value **regs,
 	return src_val;
 }
 
+std::function<llvm::Value *(llvm::Value *, llvm::Value *)>
+get_fcmp_func(const ebpf_inst &inst, llvm::IRBuilder<> &builder)
+{
+	switch (duo_opcode(inst)) {
+	case FJEQ: {
+		return [&](auto dst, auto src) {
+			/* TODO: is this OEQ, or UEQ */
+			return builder.CreateFCmpOEQ(dst, src);
+		};
+	}
+	case FJOGT: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFCmpOGT(dst, src);
+		};
+	}
+	case FJOGE: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFCmpOGE(dst, src);
+		};
+	}
+	case FJNE: {
+		return [&](auto dst, auto src) {
+			/* TODO: is this ONE or UNE */
+			return builder.CreateFCmpONE(dst, src);
+		};
+	}
+	case FJUGT: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFCmpUGT(dst, src);
+		};
+	}
+	case FJUGE: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFCmpUGE(dst, src);
+		};
+	}
+	case FJOLT: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFCmpOLT(dst, src);
+		};
+	}
+	case FJOLE: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFCmpOLE(dst, src);
+		};
+	}
+	case FJULT: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFCmpULT(dst, src);
+		};
+	}
+	case FJULE: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFCmpULE(dst, src);
+		};
+	}
+	}
+
+	SPDLOG_ERROR(
+		"Couldn't match FPU FJMP opcode to llvm:IRBuilder FCmp operation");
+	return nullptr;
+}
+
 /// Get the source representation of certain ALU operands
 llvm::Value *emitLoadALUSource(const ebpf_inst &inst, llvm::Value **regs,
 			       llvm::IRBuilder<> &builder)
@@ -404,8 +467,8 @@ emitExtFuncCall(llvm::IRBuilder<> &builder, const ebpf_inst &inst,
 
 			});
 		builder.CreateStore(callInst, regs[0]);
-		// for bpf_tail_call, just exit after calling the helper, which
-		// simulates the behavior of kernel
+		// for bpf_tail_call, just exit after calling the
+		// helper, which simulates the behavior of kernel
 		if (inst.imm == 12) {
 			builder.CreateBr(exitBlk);
 		}

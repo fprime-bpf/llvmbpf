@@ -54,6 +54,10 @@ llvm::Value *emitLoadFPUSource(const ebpf_inst &inst, llvm::Value **regs,
 void emitStoreFPUResult(const ebpf_inst &inst, llvm::Value **regs,
 			llvm::IRBuilder<> &builder, llvm::Value *result);
 
+/// FPU helper for mapping instruction opcodes to llvm::Builder Fcmp ops
+std::function<llvm::Value *(llvm::Value *, llvm::Value *)>
+get_fcmp_func(const ebpf_inst &inst, llvm::IRBuilder<> &builder);
+
 /// Get the source representation of certain ALU operands
 llvm::Value *emitLoadALUSource(const ebpf_inst &inst, llvm::Value **regs,
 			       llvm::IRBuilder<> &builder);
