@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include "ebpf_inst.h"
+#include <iostream>
 
 /* instruction classes */
 #define FLDX (0x01)
@@ -83,6 +84,49 @@
 inline uint8_t duo_opcode(const ebpf_inst &inst)
 {
 	return inst.opcode & 0xf0;
+}
+
+inline uint8_t duo_class(const ebpf_inst &inst)
+{
+	return inst.opcode & 0x7;
+}
+
+inline uint8_t duo_source(const ebpf_inst &inst)
+{
+	return inst.opcode & 0x8;
+}
+
+inline bool duo_is_fpu(const ebpf_inst &inst)
+{
+	/* FJMP instructions:
+	 * REG/REG: 1st bit of IMM is set
+	 * REG/IMM: SRC reg = 0xf */
+	if (duo_class(inst) == FJMP) {
+		std::cout << "FJMP\n";
+		if (duo_source(inst) == FREG) {
+			if (inst.imm & 0x02)
+				return true;
+		} else {
+			std::cout << ":FIMM: src=" << +inst.src
+				  << " dst=" << +inst.dst << "\n";
+			if (inst.src == 0xf)
+				return true;
+		}
+	}
+
+	/* FMOV instructions:
+	 * Are uniquely FPUs as FMEM isn't used elsewhere */
+	if (duo_opcode(inst) == FMEM)
+		return true;
+
+	/* FALU:
+	 * 1st bit of offset is set */
+	if (duo_class(inst) == FALU) {
+		if (inst.offset % 0x02)
+			return true;
+	}
+
+	return false;
 }
 
 #endif // FPU_INST_H

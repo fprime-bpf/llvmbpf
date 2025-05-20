@@ -263,22 +263,22 @@ std::tuple<llvm::Value *, llvm::Value *, llvm::Value *>
 emitJmpLoadSrcAndDstAndZeroFPU(const ebpf_inst &inst, llvm::Value **regs,
 			       llvm::IRBuilder<> &builder)
 {
-	int regSrc = (inst.opcode & 0x8) == 0x8;
-	llvm::Value *src, *dst, *zero;
-
 	/* Duotronic uses JMP even though
 	 * it uses 32 bit floats */
-	if ((inst.opcode & 0x07) == FJMP) {
-		if (regSrc) {
-			src = builder.CreateLoad(builder.getFloatTy(),
-						 regs[inst.src]);
-		} else {
-			float flt = std::bit_cast<float>(inst.imm);
-			src = llvm::ConstantFP::get(builder.getFloatTy(), flt);
-		}
-		dst = builder.CreateLoad(builder.getFloatTy(), regs[inst.dst]);
-		zero = llvm::ConstantFP::get(builder.getFloatTy(), 0);
+	assert(duo_class(inst) == FJMP);
+
+	int regSrc = duo_source(inst);
+	llvm::Value *src, *dst, *zero;
+
+	if (regSrc == FREG) {
+		src = builder.CreateLoad(builder.getFloatTy(), regs[inst.src]);
+	} else /* FIMM */ {
+		float flt = std::bit_cast<float>(inst.imm);
+		src = llvm::ConstantFP::get(builder.getFloatTy(), flt);
 	}
+	dst = builder.CreateLoad(builder.getFloatTy(), regs[inst.dst]);
+	zero = llvm::ConstantFP::get(builder.getFloatTy(), 0);
+
 	return { src, dst, zero };
 }
 

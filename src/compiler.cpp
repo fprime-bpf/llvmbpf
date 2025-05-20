@@ -327,18 +327,10 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			}
 		}
 		builder.SetInsertPoint(currBB);
-		// Precheck for registers
-		if (inst.dst > 10 || inst.src > 10) {
-			return llvm::make_error<llvm::StringError>(
-				"Illegal src reg/dst reg at pc " +
-					std::to_string(pc),
-				llvm::inconvertibleErrorCode());
-		}
 
-		bool isFPU = false;
-		if (inst.offset & 0x2) {
+		bool isFPU = duo_is_fpu(inst);
+		if (isFPU) {
 			std::cout << "FP operation detected\n";
-			isFPU = true;
 			switch (inst.opcode) {
 			case DUO_OP_FSTX: {
 				std::cout << "FSTX\n";
@@ -415,6 +407,17 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 
 		if (isFPU)
 			continue;
+
+		/* FPU NOTE: Fregs will sometimes be > 10
+		 * Therefore, the check below must succeed all fpu ops */
+
+		// Precheck for registers
+		if (inst.dst > 10 || inst.src > 10) {
+			return llvm::make_error<llvm::StringError>(
+				"Illegal src reg/dst reg at pc " +
+					std::to_string(pc),
+				llvm::inconvertibleErrorCode());
+		}
 
 		switch (inst.opcode) {
 			// ALU
