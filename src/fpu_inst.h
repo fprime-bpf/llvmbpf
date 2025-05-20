@@ -102,13 +102,10 @@ inline bool duo_is_fpu(const ebpf_inst &inst)
 	 * REG/REG: 1st bit of IMM is set
 	 * REG/IMM: SRC reg = 0xf */
 	if (duo_class(inst) == FJMP) {
-		std::cout << "FJMP\n";
 		if (duo_source(inst) == FREG) {
 			if (inst.imm & 0x02)
 				return true;
 		} else {
-			std::cout << ":FIMM: src=" << +inst.src
-				  << " dst=" << +inst.dst << "\n";
 			if (inst.src == 0xf)
 				return true;
 		}
@@ -122,7 +119,7 @@ inline bool duo_is_fpu(const ebpf_inst &inst)
 	/* FALU:
 	 * 1st bit of offset is set */
 	if (duo_class(inst) == FALU) {
-		if (inst.offset % 0x02)
+		if (inst.offset & 0x02)
 			return true;
 	}
 
