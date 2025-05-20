@@ -1,4 +1,5 @@
 #include "compiler_utils.hpp"
+#include "fpu_inst.h"
 #include <bit>
 
 namespace bpftime
@@ -200,10 +201,11 @@ emitJmpLoadSrcAndDstAndZeroFPU(const ebpf_inst &inst, llvm::Value **regs,
 			       llvm::IRBuilder<> &builder)
 {
 	int regSrc = (inst.opcode & 0x8) == 0x8;
-	using namespace llvm;
-	Value *src, *dst, *zero;
-	if ((inst.opcode & 0x07) == 0x06) {
-		// JMP32
+	llvm::Value *src, *dst, *zero;
+
+	/* Duotronic uses JMP even though
+	 * it uses 32 bit floats */
+	if ((inst.opcode & 0x07) == FJMP) {
 		if (regSrc) {
 			src = builder.CreateLoad(builder.getFloatTy(),
 						 regs[inst.src]);
@@ -213,9 +215,6 @@ emitJmpLoadSrcAndDstAndZeroFPU(const ebpf_inst &inst, llvm::Value **regs,
 		}
 		dst = builder.CreateLoad(builder.getFloatTy(), regs[inst.dst]);
 		zero = llvm::ConstantFP::get(builder.getFloatTy(), 0);
-	} else {
-		SPDLOG_ERROR("unreachable, doubles not supported\n");
-		exit(1234);
 	}
 	return { src, dst, zero };
 }

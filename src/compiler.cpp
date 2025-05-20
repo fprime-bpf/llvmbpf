@@ -7,6 +7,7 @@
 #include "llvm/IR/Argument.h"
 #include "llvm_jit_context.hpp"
 #include "ebpf_inst.h"
+#include "fpu_inst.h"
 #include "spdlog/spdlog.h"
 #include <cassert>
 #include <cstdint>
@@ -339,32 +340,45 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			std::cout << "FP operation detected\n";
 			isFPU = true;
 			switch (inst.opcode) {
-			case 0: {
+			case DUO_OP_FSTX: {
+				std::cout << "FSTX\n";
+
+				Value *src_val = emitLoadFPUSource(
+					inst, &fregs[0], builder);
+				Value *result = src_val;
+
+				emitStoreFPUResult(inst, &fregs[0], builder,
+						   result);
+				break;
+			}
+			case DUO_OP_FADD_IMM:
+			case DUO_OP_FADD_REG: {
 				std::cout << "FADD\n";
 				break;
 			}
 				/* if 3 LSB of opcode = 6 -> JMP32 */
 				/* if 4th LSB bit of opcode = 1 -> imm */
-			case 0x16:
-			case 0x26:
-			case 0x36:
-			case 0x56:
-			case 0x66:
-			case 0x76:
-			case 0xa6:
-			case 0xb6:
-			case 0xc6:
-			case 0xd6:
-			case 0x1e:
-			case 0x2e:
-			case 0x3e:
-			case 0x5e:
-			case 0x6e:
-			case 0x7e:
-			case 0xae:
-			case 0xbe:
-			case 0xce:
-			case 0xde: {
+
+			case DUO_OP_FJEQ_IMM:
+			case DUO_OP_FJEQ_REG:
+			case DUO_OP_FJOGT_IMM:
+			case DUO_OP_FJOGT_REG:
+			case DUO_OP_FJOGE_IMM:
+			case DUO_OP_FJOGE_REG:
+			case DUO_OP_FJNE_IMM:
+			case DUO_OP_FJNE_REG:
+			case DUO_OP_FJUGT_IMM:
+			case DUO_OP_FJUGT_REG:
+			case DUO_OP_FJUGE_IMM:
+			case DUO_OP_FJUGE_REG:
+			case DUO_OP_FJOLT_IMM:
+			case DUO_OP_FJOLT_REG:
+			case DUO_OP_FJOLE_IMM:
+			case DUO_OP_FJOLE_REG:
+			case DUO_OP_FJULT_IMM:
+			case DUO_OP_FJULT_REG:
+			case DUO_OP_FJULE_IMM:
+			case DUO_OP_FJULE_REG: {
 				switch ((inst.opcode & 0xf0) >> 4) {
 				case 0x1: {
 					std::cout << "Jump if ==\n";
@@ -384,9 +398,12 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 						});
 
 					/* Can be replaced by HANDLE_ERR */
-					if (!ret)
+					if (!ret) {
+						std::cout << "error\n";
 						return ret.takeError();
+					}
 
+					std::cout << "breaking\n";
 					break;
 				}
 				default: {
@@ -399,30 +416,6 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 				}
 				}
 				std::cout << "FJMP\n";
-				break;
-			}
-			case 0xb0:
-			case 0xb1:
-			case 0xb2:
-			case 0xb3:
-			case 0xb4:
-			case 0xb5:
-			case 0xb7:
-			case 0xb8:
-			case 0xb9:
-			case 0xba:
-			case 0xbb:
-			case 0xbc:
-			case 0xbd:
-			// case 0xbe:
-			case 0xbf: {
-				std::cout << "FMOV\n";
-				Value *src_val = emitLoadFPUSource(
-					inst, &fregs[0], builder);
-				Value *result = src_val;
-
-				emitStoreFPUResult(inst, &fregs[0], builder,
-						   result);
 				break;
 			}
 
@@ -722,7 +715,6 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_MOV_IMM:
 		case EBPF_OP_MOV64_REG:
 		case EBPF_OP_MOV_REG: {
-			std::cout << "MOV\n";
 			bool is_mov_sx = inst.offset != 0;
 			Value *src_val =
 				emitLoadALUSource(inst, &regs[0], builder);
@@ -835,7 +827,6 @@ According to eBPF docs, it should actually be sign-extended to
 		}
 		case EBPF_OP_STW:
 		case EBPF_OP_STXW: {
-			std::cout << "STX\n";
 			emitStore(inst, builder, &regs[0],
 				  builder.getInt32Ty());
 			break;
