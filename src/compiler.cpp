@@ -346,10 +346,16 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			case DUO_OP_FADD_IMM:
 			case DUO_OP_FADD_REG: {
 				std::cout << "FADD\n";
+
+				emitFPUWithDstAndSrc(
+					inst, builder, &fregs[0],
+					[&](Value *dst_val, Value *src_val) {
+						return builder.CreateFAdd(
+							dst_val, src_val);
+					});
+
 				break;
 			}
-				/* if 3 LSB of opcode = 6 -> JMP32 */
-				/* if 4th LSB bit of opcode = 1 -> imm */
 
 			case DUO_OP_FJEQ_IMM:
 			case DUO_OP_FJEQ_REG:
@@ -371,6 +377,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			case DUO_OP_FJULT_REG:
 			case DUO_OP_FJULE_IMM:
 			case DUO_OP_FJULE_REG: {
+				std::cout << "FJMP\n";
 				auto f_cmp_func = get_fcmp_func(inst, builder);
 
 				auto ret = emitCondJmpWithDstAndSrcFPU(
@@ -381,17 +388,14 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 				if (!ret)
 					return ret.takeError();
 				break;
-				break;
 			}
 
 			default: {
 			badfloat:
 				fprintf(stderr,
-					"\x1b[31m" /* ansi RED
-						    */
+					"\x1b[31m" /* ansi RED */
 					"BAD"
-					"\x1b[0m" /* ansi RESET
-						   */
+					"\x1b[0m" /* ansi RESET */
 					": unhandled floating point op:\n"
 					"opcode: 0x%02x______________\n"
 					"dst:    0x__%01x_____________\n"

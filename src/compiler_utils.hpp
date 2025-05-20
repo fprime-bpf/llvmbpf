@@ -54,6 +54,12 @@ llvm::Value *emitLoadFPUSource(const ebpf_inst &inst, llvm::Value **regs,
 void emitStoreFPUResult(const ebpf_inst &inst, llvm::Value **regs,
 			llvm::IRBuilder<> &builder, llvm::Value *result);
 
+void emitFPUWithDstAndSrc(
+	const ebpf_inst &inst, llvm::IRBuilder<> &builder, llvm::Value **regs,
+	std::function<llvm::Value *(llvm::Value *, llvm::Value *)> func);
+llvm::Value *emitLoadFPUDest(const ebpf_inst &inst, llvm::Value **regs,
+			     llvm::IRBuilder<> &builder);
+
 /// FPU helper for mapping instruction opcodes to llvm::Builder Fcmp ops
 std::function<llvm::Value *(llvm::Value *, llvm::Value *)>
 get_fcmp_func(const ebpf_inst &inst, llvm::IRBuilder<> &builder);

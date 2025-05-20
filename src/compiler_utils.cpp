@@ -8,13 +8,11 @@ namespace bpftime
 llvm::Value *emitLoadFPUSource(const ebpf_inst &inst, llvm::Value **regs,
 			       llvm::IRBuilder<> &builder)
 {
-	/* if 1, use register, else imm */
-	int srcTy = inst.opcode & 0x08;
+	int srcTy = duo_source(inst);
 
-	// int code = inst.opcode & 0xf0;
 	llvm::Value *src_val;
 
-	if (srcTy == EBPF_SRC_IMM) {
+	if (srcTy == FIMM) {
 		/* bit_cast is introduced in c++20 - previous versions might
 		 * have to use reinterpret_cast, although I hear it's condemned
 		 */
@@ -122,6 +120,12 @@ llvm::Value *emitLoadALUSource(const ebpf_inst &inst, llvm::Value **regs,
 	return src_val;
 }
 
+llvm::Value *emitLoadFPUDest(const ebpf_inst &inst, llvm::Value **regs,
+			     llvm::IRBuilder<> &builder)
+{
+	return builder.CreateLoad(builder.getFloatTy(), regs[inst.dst]);
+}
+
 llvm::Value *emitLoadALUDest(const ebpf_inst &inst, llvm::Value **regs,
 			     llvm::IRBuilder<> &builder, bool dstAlways64)
 {
@@ -216,6 +220,17 @@ emitALUEndianConversion(const ebpf_inst &inst, llvm::IRBuilder<> &builder,
 		} else
 			return dst_val;
 	}
+}
+
+void emitFPUWithDstAndSrc(
+	const ebpf_inst &inst, llvm::IRBuilder<> &builder, llvm::Value **regs,
+	std::function<llvm::Value *(llvm::Value *, llvm::Value *)> func)
+{
+	using namespace llvm;
+	Value *dst_val = emitLoadFPUDest(inst, &regs[0], builder);
+	Value *src_val = emitLoadFPUSource(inst, &regs[0], builder);
+	Value *result = func(dst_val, src_val);
+	emitStoreFPUResult(inst, regs, builder, result);
 }
 
 void emitALUWithDstAndSrc(
@@ -368,7 +383,8 @@ llvm::Expected<std::pair<llvm::BasicBlock *, llvm::BasicBlock *> >
 localJmpDstAndNextBlk(uint16_t pc, const ebpf_inst &inst,
 		      const std::map<uint16_t, llvm::BasicBlock *> &instBlocks)
 {
-	if (auto dst = loadJmpDstBlock(pc, inst, instBlocks, false); dst) {
+	/* TODO: should the useOffset be unconditionally true? */
+	if (auto dst = loadJmpDstBlock(pc, inst, instBlocks, true); dst) {
 		if (auto next = loadJmpNextBlock(pc, inst, instBlocks); next) {
 			return std::make_pair(dst.get(), next.get());
 		} else {
