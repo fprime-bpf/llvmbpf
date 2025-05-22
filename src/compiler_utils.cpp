@@ -59,6 +59,16 @@ get_falu_func(const ebpf_inst &inst, llvm::IRBuilder<> &builder)
 			return builder.CreateFNeg(dst);
 		};
 	}
+
+		/* TODO: same as with FNEG
+		 * we don't need dst here */
+	case FMOV: {
+		return [&](auto _dst, auto src) {
+			/* src holds the result of calling emitLoadFPUSource()
+			 * so it's already been loaded, no need to reload */
+			return src;
+		};
+	}
 	}
 
 	SPDLOG_ERROR(

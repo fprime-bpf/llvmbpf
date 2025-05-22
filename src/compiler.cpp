@@ -351,7 +351,9 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			case DUO_OP_FMUL_REG:
 			case DUO_OP_FDIV_IMM:
 			case DUO_OP_FDIV_REG:
-			case DUO_OP_FNEG: {
+			case DUO_OP_FNEG:
+			case DUO_OP_FMOV_IMM:
+			case DUO_OP_FMOV_REG: {
 				auto func = get_falu_func(inst, builder);
 
 				emitFPUWithDstAndSrc(inst, builder, &fregs[0],
