@@ -28,6 +28,45 @@ llvm::Value *emitLoadFPUSource(const ebpf_inst &inst, llvm::Value **regs,
 }
 
 std::function<llvm::Value *(llvm::Value *, llvm::Value *)>
+get_falu_func(const ebpf_inst &inst, llvm::IRBuilder<> &builder)
+{
+	switch (duo_opcode(inst)) {
+	case FADD: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFAdd(dst, src);
+		};
+	}
+	case FSUB: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFSub(dst, src);
+		};
+	}
+	case FMUL: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFMul(dst, src);
+		};
+	}
+	case FDIV: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFDiv(dst, src);
+		};
+	}
+		/* TODO: FNeg differs from other FALU ops as
+		 * it only takes one argument
+		 * Should it be kept here or separated? */
+	case FNEG: {
+		return [&](auto dst, auto _src) {
+			return builder.CreateFNeg(dst);
+		};
+	}
+	}
+
+	SPDLOG_ERROR(
+		"Couldn't match FPU FALU opcode to llvm:IRBuilder FAlu operation");
+	return nullptr;
+}
+
+std::function<llvm::Value *(llvm::Value *, llvm::Value *)>
 get_fcmp_func(const ebpf_inst &inst, llvm::IRBuilder<> &builder)
 {
 	switch (duo_opcode(inst)) {

@@ -344,15 +344,18 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 				break;
 			}
 			case DUO_OP_FADD_IMM:
-			case DUO_OP_FADD_REG: {
-				std::cout << "FADD\n";
+			case DUO_OP_FADD_REG:
+			case DUO_OP_FSUB_IMM:
+			case DUO_OP_FSUB_REG:
+			case DUO_OP_FMUL_IMM:
+			case DUO_OP_FMUL_REG:
+			case DUO_OP_FDIV_IMM:
+			case DUO_OP_FDIV_REG:
+			case DUO_OP_FNEG: {
+				auto func = get_falu_func(inst, builder);
 
-				emitFPUWithDstAndSrc(
-					inst, builder, &fregs[0],
-					[&](Value *dst_val, Value *src_val) {
-						return builder.CreateFAdd(
-							dst_val, src_val);
-					});
+				emitFPUWithDstAndSrc(inst, builder, &fregs[0],
+						     func);
 
 				break;
 			}
@@ -377,7 +380,6 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			case DUO_OP_FJULT_REG:
 			case DUO_OP_FJULE_IMM:
 			case DUO_OP_FJULE_REG: {
-				std::cout << "FJMP\n";
 				auto f_cmp_func = get_fcmp_func(inst, builder);
 
 				auto ret = emitCondJmpWithDstAndSrcFPU(
