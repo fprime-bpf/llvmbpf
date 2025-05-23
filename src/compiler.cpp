@@ -332,15 +332,39 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		if (isFPU) {
 			std::cout << "FP operation detected\n";
 			switch (inst.opcode) {
-			case DUO_OP_FSTX: {
-				std::cout << "FSTX\n";
+				/* TODO: original spec mentions offsets might be
+				 * used in FLDX and FST(X) ops - If so, then we
+				 * need to add that */
+			case DUO_OP_FSTX:
+			case DUO_OP_FST:
+			case DUO_OP_FLDX: {
+				Value *src_val;
 
-				Value *src_val = emitLoadFPUSource(
-					inst, &fregs[0], builder);
-				Value *result = src_val;
+				/* Can't use emitLoadFPUSource directly on
+				 * Load+Store instructions because they don't
+				 * use FIMM / FREG */
+				if (duo_class(inst) == FST) {
+					/* bit_cast is introduced in c++20 -
+					 * previous versions might have to use
+					 * reinterpret_cast, although I hear
+					 * it's condemned */
+					float flt =
+						std::bit_cast<float>(inst.imm);
+
+					/* convert c++ float to llvm float */
+					src_val = llvm::ConstantFP::get(
+						builder.getFloatTy(), flt);
+
+				} else {
+					/* in this branch, duo_class(inst) ==
+					  FSTX || duo_class(inst) == FLDX */
+					src_val = builder.CreateLoad(
+						builder.getFloatTy(),
+						regs[inst.src]);
+				}
 
 				emitStoreFPUResult(inst, &fregs[0], builder,
-						   result);
+						   src_val);
 				break;
 			}
 			case DUO_OP_FADD_IMM:
