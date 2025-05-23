@@ -330,7 +330,6 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 
 		bool isFPU = duo_is_fpu(inst);
 		if (isFPU) {
-			std::cout << "FP operation detected\n";
 			switch (inst.opcode) {
 				/* TODO: original spec mentions offsets might be
 				 * used in FLDX and FST(X) ops - If so, then we
@@ -355,12 +354,43 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 					src_val = llvm::ConstantFP::get(
 						builder.getFloatTy(), flt);
 
+				} else if (duo_class(inst) == FLDX) {
+					/* We're likely loading a value off the
+					 * stack */
+					if (inst.offset != 0 &&
+					    inst.src == 0xa) {
+						std::cout
+							<< "loading off stack..\n";
+
+						/* ptr to value off the stack
+						 * We insert regs, not fregs,
+						 * since that's where the
+						 * stack is at */
+						auto gep = emitLDXLoadingAddr(
+							builder, &regs[0],
+							inst);
+
+						/* Convert ptr to float ptr */
+						auto addr = builder.CreateBitCast(
+							gep,
+							builder.getFloatTy()
+								->getPointerTo());
+
+						/* dereference the ptr to
+						 * grab the float */
+						src_val = builder.CreateLoad(
+							builder.getFloatTy(),
+							addr);
+
+					} else {
+						src_val = builder.CreateLoad(
+							builder.getFloatTy(),
+							regs[inst.src]);
+					}
 				} else {
-					/* in this branch, duo_class(inst) ==
-					  FSTX || duo_class(inst) == FLDX */
 					src_val = builder.CreateLoad(
 						builder.getFloatTy(),
-						regs[inst.src]);
+						fregs[inst.src]);
 				}
 
 				emitStoreFPUResult(inst, &fregs[0], builder,
