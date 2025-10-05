@@ -120,16 +120,18 @@ static std::vector<char> compile(const std::string &ptx)
 {
     nvPTXCompilerHandle compiler = NULL;
     // Initialize PTX compiler
-    NVPTXCOMPILER_SAFE_CALL(nvPTXCompilerCreate(&compiler, 
+    NVPTXCOMPILER_SAFE_CALL(nvPTXCompilerCreate(&compiler,
                                               (size_t)ptx.size(),
                                               ptx.c_str()));
-    
-    // Set compilation options (e.g., target GPU architecture)
+
+    // Set compilation options - hardcoded to sm_60 (Maxwell/Pascal architecture)
+    // NOTE: This does NOT auto-detect GPU architecture. To target a different
+    // GPU, modify this value (e.g., sm_75 for Turing, sm_86 for Ampere)
     const char *compile_options[] = { "--gpu-name=sm_60", "--verbose" };
-    
+
     // Compile PTX to binary
     NVPTXCOMPILER_SAFE_CALL(nvPTXCompilerCompile(compiler, 2, compile_options));
-    
+
     // Retrieve compiled binary
     size_t elfSize;
     NVPTXCOMPILER_SAFE_CALL(
@@ -137,7 +139,7 @@ static std::vector<char> compile(const std::string &ptx)
     std::vector<char> elf_binary(elfSize, 0);
     NVPTXCOMPILER_SAFE_CALL(nvPTXCompilerGetCompiledProgram(
         compiler, (void *)elf_binary.data()));
-    
+
     // Clean up
     NVPTXCOMPILER_SAFE_CALL(nvPTXCompilerDestroy(&compiler));
     return elf_binary;

@@ -13,7 +13,7 @@ This component is part of the [bpftime](https://github.com/eunomia-bpf/bpftime) 
 - Loads and executes AOT-compiled ELF object files within the eBPF runtime.
 - Supports eBPF helpers and maps lddw functions.
 - **GPU Execution Support**:
-  - **PTX generation for NVIDIA CUDA GPUs** with automatic compute capability detection
+  - **PTX generation for NVIDIA CUDA GPUs**
   - **SPIR-V generation for cross-vendor GPUs** (Intel, AMD, NVIDIA, ARM) via OpenCL/Vulkan
 
 This library is optimized for performance, flexibility, and minimal dependencies. It does not include maps implement, helpers, verifiers, or loaders for eBPF applications, making it suitable as a lightweight, high-performance library.
@@ -394,8 +394,6 @@ llvmbpf supports running eBPF programs on GPUs through two backends:
 | **SPIR-V** | Intel, AMD, NVIDIA, ARM, Mali, PowerVR | Cross-vendor, OpenCL, Vulkan, portability | LLVM 18+ (LLVM 20+ recommended) |
 | **PTX** | NVIDIA CUDA | NVIDIA-specific, maximum performance | CUDA Toolkit, LLVM 15+ |
 
-Both backends support **automatic GPU architecture detection** and generate optimized code for the detected hardware.
-
 ### SPIR-V for Cross-Vendor GPUs
 
 Generate SPIR-V binary for execution on **any GPU vendor** via OpenCL or Vulkan. SPIR-V is an industry-standard intermediate representation that works across Intel, AMD, NVIDIA, ARM, and other GPU vendors.
@@ -436,13 +434,14 @@ See [example/spirv](example/spirv) for detailed documentation and examples.
 
 ### PTX for NVIDIA CUDA GPUs
 
-Generate PTX code for NVIDIA GPUs with automatic compute capability detection. PTX provides direct access to NVIDIA-specific features and maximum performance on CUDA hardware.
+Generate PTX code for NVIDIA GPUs. PTX provides direct access to NVIDIA-specific features and maximum performance on CUDA hardware.
 
 **Features:**
-- NVIDIA CUDA GPU support with automatic compute capability detection (sm_XX)
+- NVIDIA CUDA GPU support
 - Direct PTX generation from eBPF bytecode
 - Optimized for NVIDIA hardware (from Kepler to latest Hopper/Blackwell)
 - Host-device communication via trampoline
+- **Note:** Compute capability (sm_XX) is hardcoded in the example (sm_60). Modify the code to target your specific GPU architecture.
 
 **Build and Run:**
 
@@ -453,15 +452,14 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release \
     -DLLVMBPF_CUDA_PATH=/usr/local/cuda
 cmake --build build --target ptx_test -j
 
-# Run on NVIDIA GPU (auto-detects compute capability)
+# Run on NVIDIA GPU
 ./build/example/ptx/ptx_test
 ```
 
-**Output Example (RTX 5090):**
+**Output Example:**
 ```
-Detected GPU: NVIDIA GeForce RTX 5090 with compute capability 12.0 (using sm_120)
-Generating PTX for sm_120...
-ptxas info: Compiling entry function 'bpf_main' for 'sm_120'
+Current PTX Compiler API Version : X.Y
+Info log: ptxas info: Compiling entry function 'bpf_main' for 'sm_60'
 ```
 
 See [example/ptx](example/ptx) for detailed documentation and examples.
