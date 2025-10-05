@@ -89,12 +89,12 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	const std::vector<std::string> &extFuncNames,
 	const std::vector<std::string> &lddwHelpers,
 	bool patch_map_val_at_compile_time, bool main_func_with_arguments,
-	const std::string &func_name, bool is_cuda)
+	const std::string &func_name, bool is_gpu)
 {
 	SPDLOG_DEBUG(
-		"Generating module: patch_map_val_at_compile_time={}, with arguments={}, func_name={}, is_cuda={}",
+		"Generating module: patch_map_val_at_compile_time={}, with arguments={}, func_name={}, is_gpu={}",
 		patch_map_val_at_compile_time, main_func_with_arguments,
-		func_name, is_cuda);
+		func_name, is_gpu);
 	auto context = std::make_unique<LLVMContext>();
 	auto jitModule = std::make_unique<Module>("bpf-jit", *context);
 	const auto &insts = vm.instructions;
@@ -140,7 +140,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	for (const auto &name : extFuncNames) {
 		Function *currFunc = Function::Create(
 			helperFuncTy,
-			is_cuda ? Function::LinkageTypes::ExternalLinkage :
+			is_gpu ? Function::LinkageTypes::ExternalLinkage :
 				  Function::ExternalLinkage,
 			name, jitModule.get());
 		extFunc[name] = currFunc;
@@ -168,16 +168,20 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	}
 	FunctionType *func_ty;
 	if (main_func_with_arguments) {
+		// For SPIR-V/CUDA, use address space 1 (Global) for kernel parameters
+		// For regular JIT, use default address space (0)
+		unsigned addrSpace = is_gpu ? 1 : 0;
 		func_ty = FunctionType::get(
-			is_cuda ? Type::getVoidTy(*context) :
+			is_gpu ? Type::getVoidTy(*context) :
 				  Type::getInt64Ty(*context),
-			{ llvm::PointerType::getUnqual(
-				  llvm::Type::getInt8Ty(*context)),
+			{ llvm::PointerType::get(
+				  llvm::Type::getInt8Ty(*context),
+				  addrSpace),
 			  Type::getInt64Ty(*context) },
 			false);
 	} else {
 		func_ty =
-			FunctionType::get(is_cuda ? Type::getVoidTy(*context) :
+			FunctionType::get(is_gpu ? Type::getVoidTy(*context) :
 						    Type::getInt64Ty(*context),
 					  {}, false);
 	}
@@ -202,11 +206,23 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 				"r" + std::to_string(i)));
 		}
 		// Create stack
-		auto stackBegin = builder.CreateAlloca(
-			builder.getInt64Ty(),
-			builder.getInt32(STACK_SIZE * MAX_LOCAL_FUNC_DEPTH +
-					 10),
-			"stackBegin");
+		// For SPIR-V/CUDA, use array type to avoid VLA issues
+		llvm::Value *stackBegin;
+		if (is_gpu) {
+			auto stackArrayTy = llvm::ArrayType::get(
+				builder.getInt64Ty(),
+				STACK_SIZE * MAX_LOCAL_FUNC_DEPTH + 10);
+			stackBegin = builder.CreateAlloca(stackArrayTy,
+							   nullptr,
+							   "stackBegin");
+		} else {
+			stackBegin = builder.CreateAlloca(
+				builder.getInt64Ty(),
+				builder.getInt32(STACK_SIZE *
+							 MAX_LOCAL_FUNC_DEPTH +
+						 10),
+				"stackBegin");
+		}
 		auto stackEnd = builder.CreateGEP(
 			builder.getInt64Ty(), stackBegin,
 			{ builder.getInt32(STACK_SIZE * MAX_LOCAL_FUNC_DEPTH) },
@@ -214,9 +230,18 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		// Write stack pointer into r10
 		builder.CreateStore(stackEnd, regs[10]);
 
-		callStack = builder.CreateAlloca(
-			builder.getPtrTy(),
-			builder.getInt32(CALL_STACK_SIZE * 5), "callStack");
+		if (is_gpu) {
+			auto callStackArrayTy = llvm::ArrayType::get(
+				builder.getPtrTy(), CALL_STACK_SIZE * 5);
+			callStack = builder.CreateAlloca(callStackArrayTy,
+							  nullptr,
+							  "callStack");
+		} else {
+			callStack = builder.CreateAlloca(
+				builder.getPtrTy(),
+				builder.getInt32(CALL_STACK_SIZE * 5),
+				"callStack");
+		}
 		callItemCnt = builder.CreateAlloca(builder.getInt64Ty(),
 						   nullptr, "callItemCnt");
 		builder.CreateStore(builder.getInt64(0), callItemCnt);
@@ -271,7 +296,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 
 	{
 		IRBuilder<> builder(exitBlk);
-		if (is_cuda) {
+		if (is_gpu) {
 			builder.CreateRetVoid();
 		} else {
 			builder.CreateRet(builder.CreateLoad(
@@ -1341,7 +1366,7 @@ this conversion.
 			builder.CreateBr(allBlocks[i + 1]);
 		}
 	}
-	if (!is_cuda && verifyModule(*jitModule, &dbgs())) {
+	if (!is_gpu && verifyModule(*jitModule, &dbgs())) {
 		return llvm::make_error<llvm::StringError>(
 			"Invalid module generated",
 			llvm::inconvertibleErrorCode());

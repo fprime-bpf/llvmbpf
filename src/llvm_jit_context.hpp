@@ -44,7 +44,7 @@ class llvm_bpf_jit_context {
 		       bool patch_map_val_at_compile_time,
 		       bool main_func_with_arguments = true,
 		       const std::string &func_name = "bpf_main",
-		       bool is_cuda = false);
+		       bool is_gpu = false);
 	std::vector<uint8_t>
 	do_aot_compile(const std::vector<std::string> &extFuncNames,
 		       const std::vector<std::string> &lddwHelpers,
@@ -66,6 +66,10 @@ class llvm_bpf_jit_context {
 	generate_ptx(bool main_with_arguments = true,
 		     const std::string &func_name = "bpf_main",
 		     const char *target_cpu = "sm_60");
+	std::optional<std::vector<uint8_t>>
+	generate_spirv(bool main_with_arguments = true,
+		       const std::string &func_name = "bpf_main",
+		       const char *target_env = "");
 };
 
 } // namespace bpftime

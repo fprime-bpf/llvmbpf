@@ -60,7 +60,7 @@ option(BUILD_LLVM_AOT_CLI "Build AOT cli, which rely on libbpf" NO)
 if(ENABLE_LLVM_SHARED)
     list(PREPEND LLVM_LIBS LLVM)
 else()
-    llvm_map_components_to_libnames(LLVM_LIBS
+    set(LLVM_COMPONENTS
       ${LLVM_TARGETS_TO_BUILD}
         Core
         Support
@@ -94,6 +94,18 @@ else()
         AArch64Info
         AArch64AsmParser
     )
+
+    # Add SPIR-V components only if SPIR-V is enabled and LLVM version supports it
+    if(LLVMBPF_ENABLE_SPIRV AND ${LLVM_VERSION_MAJOR} GREATER_EQUAL 18)
+        list(APPEND LLVM_COMPONENTS
+            SPIRVCodeGen
+            SPIRVDesc
+            SPIRVInfo
+        )
+        message(STATUS "Adding SPIR-V LLVM components (LLVM ${LLVM_VERSION_MAJOR})")
+    endif()
+
+    llvm_map_components_to_libnames(LLVM_LIBS ${LLVM_COMPONENTS})
 endif()
 include(FetchContent)
 
@@ -145,6 +157,20 @@ target_include_directories(llvmbpf_vm
 )
 add_dependencies(llvmbpf_vm spdlog::spdlog)
 
+# SPIR-V support requires LLVM 18+ (native backend in LLVM 20+)
+if(LLVMBPF_ENABLE_SPIRV)
+    if(${LLVM_VERSION_MAJOR} LESS 18)
+        message(FATAL_ERROR "SPIR-V support requires LLVM 18 or higher. Current version: ${LLVM_VERSION_MAJOR}.${LLVM_VERSION_MINOR}")
+    endif()
+    if(${LLVM_VERSION_MAJOR} GREATER_EQUAL 20)
+        message(STATUS "SPIR-V: Using native LLVM backend (LLVM ${LLVM_VERSION_MAJOR})")
+    elseif(${LLVM_VERSION_MAJOR} GREATER_EQUAL 18)
+        message(STATUS "SPIR-V: LLVM ${LLVM_VERSION_MAJOR} detected. Native backend available in LLVM 20+")
+        message(STATUS "SPIR-V: Consider upgrading to LLVM 20 for native support")
+    endif()
+    target_compile_definitions(llvmbpf_vm PRIVATE LLVMBPF_HAS_SPIRV=1)
+endif()
+
 if(BPFTIME_ENABLE_CODE_COVERAGE)
     target_compile_options(llvmbpf_vm PUBLIC -O0 -g -fprofile-arcs -ftest-coverage)
     target_link_options(llvmbpf_vm PUBLIC -fprofile-arcs -ftest-coverage)
@@ -160,7 +186,12 @@ add_subdirectory(example)
 
 
 option(LLVMBPF_ENABLE_PTX "Whether build the ptx demo program, which requires CUDA" OFF)
+option(LLVMBPF_ENABLE_SPIRV "Whether build the SPIR-V demo program, which requires OpenCL" OFF)
 
 if(LLVMBPF_ENABLE_PTX)
     add_subdirectory(example/ptx)
+endif()
+
+if(LLVMBPF_ENABLE_SPIRV)
+    add_subdirectory(example/spirv)
 endif()
