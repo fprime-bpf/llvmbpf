@@ -71,7 +71,9 @@ endif()
 
 include(FetchContent)
 
-if(NOT DEFINED SPDLOG_INCLUDE)
+if(USE_SYSTEM_SPDLOG)
+    find_package(spdlog CONFIG REQUIRED)
+elseif(NOT DEFINED SPDLOG_INCLUDE)
     message(INFO " Adding spdlog seperately..")
 
     # spdlog
@@ -115,11 +117,11 @@ endif()
 
 message(STATUS "LLVM_LIBS=${LLVM_LIBS}")
 
-target_link_libraries(llvmbpf_vm PUBLIC ${LLVM_LIBS} PRIVATE spdlog::spdlog)
+target_link_libraries(llvmbpf_vm PUBLIC ${LLVM_LIBS} PRIVATE spdlog::spdlog_header_only)
 target_include_directories(llvmbpf_vm
     PUBLIC ${LLVM_INCLUDE_DIRS} ${SPDLOG_INCLUDE} ${Boost_INCLUDE} ../include include # LLVM jit also used these headers
 )
-add_dependencies(llvmbpf_vm spdlog::spdlog)
+add_dependencies(llvmbpf_vm spdlog::spdlog_header_only)
 
 if(BPFTIME_ENABLE_CODE_COVERAGE)
     target_compile_options(llvmbpf_vm PUBLIC -O0 -g -fprofile-arcs -ftest-coverage)
