@@ -15,23 +15,49 @@ set(LLVM_LINK_COMPONENTS
   )
 target_link_directories(ptx_test PRIVATE ${LLVMBPF_CUDA_PATH}/lib64 ${LLVMBPF_CUDA_PATH}/lib64/stubs)
 
-find_library(NVPTXCOMPILER_LIB 
-    NAMES 
-    nvptxcompiler_static 
-    PATHS 
-    ${LLVMBPF_CUDA_PATH}/lib64 
-    ${LLVMBPF_CUDA_PATH}/lib64/stubs 
-    NO_DEFAULT_PATH)
-if(NOT NVPTXCOMPILER_LIB)
-    message(FATAL_ERROR "nvptxcompiler_static library not found in ${LLVMBPF_CUDA_PATH}/lib64 or ${LLVMBPF_CUDA_PATH}/lib64/stubs")
+# Detect CUDA version to determine if nvptxcompiler_static is available
+if(EXISTS "${LLVMBPF_CUDA_PATH}/version.json")
+    file(READ "${LLVMBPF_CUDA_PATH}/version.json" CUDA_VERSION_JSON)
+    string(REGEX MATCH "\"cuda\"[^{]*\\{[^}]*\"version\"[^\"]*\"([0-9]+)\\.([0-9]+)" _ "${CUDA_VERSION_JSON}")
+    set(LLVMBPF_CUDA_VERSION_MAJOR ${CMAKE_MATCH_1})
+elseif(EXISTS "${LLVMBPF_CUDA_PATH}/version.txt")
+    file(READ "${LLVMBPF_CUDA_PATH}/version.txt" CUDA_VERSION_TXT)
+    string(REGEX MATCH "CUDA Version ([0-9]+)\\.([0-9]+)" _ "${CUDA_VERSION_TXT}")
+    set(LLVMBPF_CUDA_VERSION_MAJOR ${CMAKE_MATCH_1})
+else()
+    string(REGEX MATCH "cuda-([0-9]+)\\.([0-9]+)" _ "${LLVMBPF_CUDA_PATH}")
+    set(LLVMBPF_CUDA_VERSION_MAJOR ${CMAKE_MATCH_1})
 endif()
-target_link_libraries(ptx_test 
-            PRIVATE 
-            ${LLVM_LIBS} 
-            llvmbpf_vm 
-            cuda 
-            ${NVPTXCOMPILER_LIB} 
-            spdlog::spdlog)
+
+# nvptxcompiler_static is only available in CUDA 12.x and earlier
+if(LLVMBPF_CUDA_VERSION_MAJOR LESS 13)
+    find_library(NVPTXCOMPILER_LIB
+        NAMES
+        nvptxcompiler_static
+        PATHS
+        ${LLVMBPF_CUDA_PATH}/lib64
+        ${LLVMBPF_CUDA_PATH}/lib64/stubs
+        NO_DEFAULT_PATH)
+    if(NOT NVPTXCOMPILER_LIB)
+        message(FATAL_ERROR "nvptxcompiler_static library not found in ${LLVMBPF_CUDA_PATH}/lib64 or ${LLVMBPF_CUDA_PATH}/lib64/stubs")
+    endif()
+    message(STATUS "CUDA ${LLVMBPF_CUDA_VERSION_MAJOR}.x: Linking with nvptxcompiler_static")
+    target_link_libraries(ptx_test
+                PRIVATE
+                ${LLVM_LIBS}
+                llvmbpf_vm
+                cuda
+                ${NVPTXCOMPILER_LIB}
+                spdlog::spdlog)
+else()
+    message(STATUS "CUDA ${LLVMBPF_CUDA_VERSION_MAJOR}.x: Skipping nvptxcompiler_static (not available)")
+    target_link_libraries(ptx_test
+                PRIVATE
+                ${LLVM_LIBS}
+                llvmbpf_vm
+                cuda
+                spdlog::spdlog)
+endif()
   
 add_dependencies(ptx_test llvmbpf_vm spdlog::spdlog)
 target_include_directories(ptx_test PRIVATE ${LLVM_INCLUDE_DIRS} include src ${LLVMBPF_CUDA_PATH}/include ${SPDLOG_INCLUDES})
