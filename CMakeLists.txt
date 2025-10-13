@@ -86,6 +86,8 @@ elseif(NOT DEFINED SPDLOG_INCLUDE)
 
     # Make the spdlog target available
     FetchContent_MakeAvailable(spdlog)
+else()
+    find_package(spdlog)
 endif()
 
 # if BPFTIME_LLVM_JIT is set, then it's built in the bpftime project.

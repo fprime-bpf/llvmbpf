@@ -48,6 +48,26 @@ static inline bool is_alu64(const ebpf_inst &insn)
 	return (insn.opcode & 0x07) == EBPF_CLS_ALU64;
 }
 
+/// Get the source representation of certain FPU operands
+llvm::Value *emitLoadFPUSource(const ebpf_inst &inst, llvm::Value **regs,
+			       llvm::IRBuilder<> &builder);
+void emitStoreFPUResult(const ebpf_inst &inst, llvm::Value **regs,
+			llvm::IRBuilder<> &builder, llvm::Value *result);
+
+void emitFPUWithDstAndSrc(
+	const ebpf_inst &inst, llvm::IRBuilder<> &builder, llvm::Value **regs,
+	std::function<llvm::Value *(llvm::Value *, llvm::Value *)> func);
+llvm::Value *emitLoadFPUDest(const ebpf_inst &inst, llvm::Value **regs,
+			     llvm::IRBuilder<> &builder);
+
+/// FPU helper for mapping instruction opcodes to llvm::Builder Fcmp ops
+std::function<llvm::Value *(llvm::Value *, llvm::Value *)>
+get_fcmp_func(const ebpf_inst &inst, llvm::IRBuilder<> &builder);
+
+/// FPU helper for mapping instruction opcodes to llvm::Builder FALU ops
+std::function<llvm::Value *(llvm::Value *, llvm::Value *)>
+get_falu_func(const ebpf_inst &inst, llvm::IRBuilder<> &builder);
+
 /// Get the source representation of certain ALU operands
 llvm::Value *emitLoadALUSource(const ebpf_inst &inst, llvm::Value **regs,
 			       llvm::IRBuilder<> &builder);
@@ -73,6 +93,10 @@ void emitStore(const ebpf_inst &inst, llvm::IRBuilder<> &builder,
 	       llvm::Value **regs, llvm::IntegerType *destTy);
 
 std::tuple<llvm::Value *, llvm::Value *, llvm::Value *>
+emitJmpLoadSrcAndDstAndZeroFPU(const ebpf_inst &inst, llvm::Value **regs,
+			       llvm::IRBuilder<> &builder);
+
+std::tuple<llvm::Value *, llvm::Value *, llvm::Value *>
 emitJmpLoadSrcAndDstAndZero(const ebpf_inst &inst, llvm::Value **regs,
 			    llvm::IRBuilder<> &builder);
 
@@ -95,6 +119,12 @@ void emitLDXStoringResult(llvm::IRBuilder<> &builder, llvm::Value **regs,
 			  const ebpf_inst &inst, llvm::Value *result);
 void emitLoadX(llvm::IRBuilder<> &builder, llvm::Value **regs,
 	       const ebpf_inst &inst, llvm::IntegerType *srcTy);
+
+llvm::Expected<int> emitCondJmpWithDstAndSrcFPU(
+	llvm::IRBuilder<> &builder, uint16_t pc, const ebpf_inst &inst,
+	const std::map<uint16_t, llvm::BasicBlock *> &instBlocks,
+	llvm::Value **regs,
+	std::function<llvm::Value *(llvm::Value *, llvm::Value *)> func);
 
 llvm::Expected<int> emitCondJmpWithDstAndSrc(
 	llvm::IRBuilder<> &builder, uint16_t pc, const ebpf_inst &inst,

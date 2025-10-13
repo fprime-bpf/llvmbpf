@@ -1,7 +1,144 @@
 #include "compiler_utils.hpp"
+#include "fpu_inst.h"
+#include <bit>
 
 namespace bpftime
 {
+/// Get the source representation of certain FPU operands
+llvm::Value *emitLoadFPUSource(const ebpf_inst &inst, llvm::Value **regs,
+			       llvm::IRBuilder<> &builder)
+{
+	int srcTy = duo_source(inst);
+
+	llvm::Value *src_val;
+
+	if (srcTy == FIMM) {
+		/* bit_cast is introduced in c++20 - previous versions might
+		 * have to use reinterpret_cast, although I hear it's condemned
+		 */
+		float flt = std::bit_cast<float>(inst.imm);
+
+		/* convert c++ float to llvm float */
+		src_val = llvm::ConstantFP::get(builder.getFloatTy(), flt);
+	} else {
+		src_val = builder.CreateLoad(builder.getFloatTy(),
+					     regs[inst.src]);
+	}
+	return src_val;
+}
+
+std::function<llvm::Value *(llvm::Value *, llvm::Value *)>
+get_falu_func(const ebpf_inst &inst, llvm::IRBuilder<> &builder)
+{
+	switch (duo_opcode(inst)) {
+	case FADD: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFAdd(dst, src);
+		};
+	}
+	case FSUB: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFSub(dst, src);
+		};
+	}
+	case FMUL: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFMul(dst, src);
+		};
+	}
+	case FDIV: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFDiv(dst, src);
+		};
+	}
+		/* TODO: FNeg differs from other FALU ops as
+		 * it only takes one argument
+		 * Should it be kept here or separated? */
+	case FNEG: {
+		return [&](auto dst, auto _src) {
+			return builder.CreateFNeg(dst);
+		};
+	}
+
+		/* TODO: same as with FNEG
+		 * we don't need dst here */
+	case FMOV: {
+		return [&](auto _dst, auto src) {
+			/* src holds the result of calling emitLoadFPUSource()
+			 * so it's already been loaded, no need to reload */
+			return src;
+		};
+	}
+	}
+
+	SPDLOG_ERROR(
+		"Couldn't match FPU FALU opcode to llvm:IRBuilder FAlu operation");
+	return nullptr;
+}
+
+std::function<llvm::Value *(llvm::Value *, llvm::Value *)>
+get_fcmp_func(const ebpf_inst &inst, llvm::IRBuilder<> &builder)
+{
+	switch (duo_opcode(inst)) {
+	case FJEQ: {
+		return [&](auto dst, auto src) {
+			/* TODO: is this OEQ, or UEQ */
+			return builder.CreateFCmpOEQ(dst, src);
+		};
+	}
+	case FJOGT: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFCmpOGT(dst, src);
+		};
+	}
+	case FJOGE: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFCmpOGE(dst, src);
+		};
+	}
+	case FJNE: {
+		return [&](auto dst, auto src) {
+			/* TODO: is this ONE or UNE */
+			return builder.CreateFCmpONE(dst, src);
+		};
+	}
+	case FJUGT: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFCmpUGT(dst, src);
+		};
+	}
+	case FJUGE: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFCmpUGE(dst, src);
+		};
+	}
+	case FJOLT: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFCmpOLT(dst, src);
+		};
+	}
+	case FJOLE: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFCmpOLE(dst, src);
+		};
+	}
+	case FJULT: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFCmpULT(dst, src);
+		};
+	}
+	case FJULE: {
+		return [&](auto dst, auto src) {
+			return builder.CreateFCmpULE(dst, src);
+		};
+	}
+	}
+
+	SPDLOG_ERROR(
+		"Couldn't match FPU FJMP opcode to llvm:IRBuilder FCmp operation");
+	return nullptr;
+}
+
 /// Get the source representation of certain ALU operands
 llvm::Value *emitLoadALUSource(const ebpf_inst &inst, llvm::Value **regs,
 			       llvm::IRBuilder<> &builder)
@@ -32,6 +169,12 @@ llvm::Value *emitLoadALUSource(const ebpf_inst &inst, llvm::Value **regs,
 	return src_val;
 }
 
+llvm::Value *emitLoadFPUDest(const ebpf_inst &inst, llvm::Value **regs,
+			     llvm::IRBuilder<> &builder)
+{
+	return builder.CreateLoad(builder.getFloatTy(), regs[inst.dst]);
+}
+
 llvm::Value *emitLoadALUDest(const ebpf_inst &inst, llvm::Value **regs,
 			     llvm::IRBuilder<> &builder, bool dstAlways64)
 {
@@ -40,6 +183,12 @@ llvm::Value *emitLoadALUDest(const ebpf_inst &inst, llvm::Value **regs,
 	} else {
 		return builder.CreateLoad(builder.getInt32Ty(), regs[inst.dst]);
 	}
+}
+
+void emitStoreFPUResult(const ebpf_inst &inst, llvm::Value **fregs,
+			llvm::IRBuilder<> &builder, llvm::Value *result)
+{
+	builder.CreateStore(result, fregs[inst.dst]);
 }
 
 void emitStoreALUResult(const ebpf_inst &inst, llvm::Value **regs,
@@ -122,6 +271,17 @@ emitALUEndianConversion(const ebpf_inst &inst, llvm::IRBuilder<> &builder,
 	}
 }
 
+void emitFPUWithDstAndSrc(
+	const ebpf_inst &inst, llvm::IRBuilder<> &builder, llvm::Value **regs,
+	std::function<llvm::Value *(llvm::Value *, llvm::Value *)> func)
+{
+	using namespace llvm;
+	Value *dst_val = emitLoadFPUDest(inst, &regs[0], builder);
+	Value *src_val = emitLoadFPUSource(inst, &regs[0], builder);
+	Value *result = func(dst_val, src_val);
+	emitStoreFPUResult(inst, regs, builder, result);
+}
+
 void emitALUWithDstAndSrc(
 	const ebpf_inst &inst, llvm::IRBuilder<> &builder, llvm::Value **regs,
 	std::function<llvm::Value *(llvm::Value *, llvm::Value *)> func)
@@ -161,6 +321,29 @@ void emitStore(const ebpf_inst &inst, llvm::IRBuilder<> &builder,
 
 	Value *result = builder.CreateTrunc(src, destTy);
 	emitStoreWritingResult(inst, builder, &regs[0], result);
+}
+
+std::tuple<llvm::Value *, llvm::Value *, llvm::Value *>
+emitJmpLoadSrcAndDstAndZeroFPU(const ebpf_inst &inst, llvm::Value **regs,
+			       llvm::IRBuilder<> &builder)
+{
+	/* Duotronic uses JMP even though
+	 * it uses 32 bit floats */
+	assert(duo_class(inst) == FJMP);
+
+	int regSrc = duo_source(inst);
+	llvm::Value *src, *dst, *zero;
+
+	if (regSrc == FREG) {
+		src = builder.CreateLoad(builder.getFloatTy(), regs[inst.src]);
+	} else /* FIMM */ {
+		float flt = std::bit_cast<float>(inst.imm);
+		src = llvm::ConstantFP::get(builder.getFloatTy(), flt);
+	}
+	dst = builder.CreateLoad(builder.getFloatTy(), regs[inst.dst]);
+	zero = llvm::ConstantFP::get(builder.getFloatTy(), 0);
+
+	return { src, dst, zero };
 }
 
 std::tuple<llvm::Value *, llvm::Value *, llvm::Value *>
@@ -249,6 +432,7 @@ llvm::Expected<std::pair<llvm::BasicBlock *, llvm::BasicBlock *> >
 localJmpDstAndNextBlk(uint16_t pc, const ebpf_inst &inst,
 		      const std::map<uint16_t, llvm::BasicBlock *> &instBlocks)
 {
+	/* TODO: should the useOffset be unconditionally true? */
 	if (auto dst = loadJmpDstBlock(pc, inst, instBlocks, true); dst) {
 		if (auto next = loadJmpNextBlock(pc, inst, instBlocks); next) {
 			return std::make_pair(dst.get(), next.get());
@@ -286,6 +470,23 @@ void emitLoadX(llvm::IRBuilder<> &builder, llvm::Value **regs,
 	Value *addr = emitLDXLoadingAddr(builder, &regs[0], inst);
 	Value *result = builder.CreateLoad(srcTy, addr);
 	emitLDXStoringResult(builder, &regs[0], inst, result);
+}
+
+llvm::Expected<int> emitCondJmpWithDstAndSrcFPU(
+	llvm::IRBuilder<> &builder, uint16_t pc, const ebpf_inst &inst,
+	const std::map<uint16_t, llvm::BasicBlock *> &instBlocks,
+	llvm::Value **regs,
+	std::function<llvm::Value *(llvm::Value *, llvm::Value *)> func)
+{
+	if (auto ret = localJmpDstAndNextBlk(pc, inst, instBlocks); ret) {
+		auto [dstBlk, nextBlk] = ret.get();
+		auto [src, dst, _] =
+			emitJmpLoadSrcAndDstAndZeroFPU(inst, &regs[0], builder);
+		builder.CreateCondBr(func(dst, src), dstBlk, nextBlk);
+		return 0;
+	} else {
+		return ret.takeError();
+	}
 }
 
 llvm::Expected<int> emitCondJmpWithDstAndSrc(
@@ -331,8 +532,8 @@ emitExtFuncCall(llvm::IRBuilder<> &builder, const ebpf_inst &inst,
 
 			});
 		builder.CreateStore(callInst, regs[0]);
-		// for bpf_tail_call, just exit after calling the helper, which
-		// simulates the behavior of kernel
+		// for bpf_tail_call, just exit after calling the
+		// helper, which simulates the behavior of kernel
 		if (inst.imm == 12) {
 			builder.CreateBr(exitBlk);
 		}
