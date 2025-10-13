@@ -30,7 +30,7 @@ const static char *LDDW_HELPER_CODE_ADDR = "__lddw_helper_code_addr";
 
 #ifndef EBPF_STACK_SIZE
 // Compatible to C headers
-#define EBPF_STACK_SIZE 512
+#define EBPF_STACK_SIZE 10000
 #endif
 
 class llvm_bpf_jit_context {
