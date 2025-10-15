@@ -72,7 +72,7 @@ endif()
 include(FetchContent)
 
 if(USE_SYSTEM_SPDLOG)
-    find_package(spdlog CONFIG REQUIRED)
+    find_package(spdlog REQUIRED)
 elseif(NOT DEFINED SPDLOG_INCLUDE)
     message(INFO " Adding spdlog seperately..")
 
@@ -81,7 +81,7 @@ elseif(NOT DEFINED SPDLOG_INCLUDE)
     FetchContent_Declare(
         spdlog
         GIT_REPOSITORY https://github.com/gabime/spdlog.git
-        GIT_TAG v1.14.1 # Specify the version you want to use
+        GIT_TAG v1.16.0 # Specify the version you want to use
     )
 
     # Make the spdlog target available
