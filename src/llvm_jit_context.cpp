@@ -425,7 +425,8 @@ llvm_bpf_jit_context::create_and_initialize_lljit_instance()
 	SPDLOG_DEBUG("LLVM-JIT: Creating LLJIT instance");
 	auto jit_err = LLJITBuilder().create();
 	if (!jit_err) {
-		(void)jit_err.takeError();
+		auto err = jit_err.takeError();
+    SPDLOG_ERROR(llvm::toString(std::move(err)));
 		return std::make_tuple(nullptr, std::vector<std::string>{},
 				       std::vector<std::string>{});
 	}

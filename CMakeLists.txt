@@ -117,11 +117,11 @@ endif()
 
 message(STATUS "LLVM_LIBS=${LLVM_LIBS}")
 
-target_link_libraries(llvmbpf_vm PUBLIC ${LLVM_LIBS} PRIVATE spdlog::spdlog_header_only)
+target_link_libraries(llvmbpf_vm PUBLIC ${LLVM_LIBS} PRIVATE spdlog::spdlog)
 target_include_directories(llvmbpf_vm
     PUBLIC ${LLVM_INCLUDE_DIRS} ${SPDLOG_INCLUDE} ${Boost_INCLUDE} ../include include # LLVM jit also used these headers
 )
-add_dependencies(llvmbpf_vm spdlog::spdlog_header_only)
+add_dependencies(llvmbpf_vm spdlog::spdlog)
 
 if(BPFTIME_ENABLE_CODE_COVERAGE)
     target_compile_options(llvmbpf_vm PUBLIC -O0 -g -fprofile-arcs -ftest-coverage)
