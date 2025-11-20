@@ -11,6 +11,7 @@
 #include "spdlog/spdlog.h"
 #include <cassert>
 #include <cstdint>
+#include <llvm/IR/DerivedTypes.h>
 #include <llvm/Support/Alignment.h>
 #include <llvm/Support/AtomicOrdering.h>
 #include <llvm/Support/Error.h>
@@ -89,10 +90,13 @@ const size_t MAX_LOCAL_FUNC_DEPTH = 32;
 Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	const std::vector<std::string> &extFuncNames,
 	const std::vector<std::string> &lddwHelpers,
-	bool patch_map_val_at_compile_time)
+	bool patch_map_val_at_compile_time, bool main_func_with_arguments,
+	const std::string &func_name, bool is_gpu)
 {
-	SPDLOG_DEBUG("Generating module: patch_map_val_at_compile_time={}",
-		     patch_map_val_at_compile_time);
+	SPDLOG_DEBUG(
+		"Generating module: patch_map_val_at_compile_time={}, with arguments={}, func_name={}, is_gpu={}",
+		patch_map_val_at_compile_time, main_func_with_arguments,
+		func_name, is_gpu);
 	auto context = std::make_unique<LLVMContext>();
 	auto jitModule = std::make_unique<Module>("bpf-jit", *context);
 	const auto &insts = vm.instructions;
@@ -136,9 +140,11 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		false);
 
 	for (const auto &name : extFuncNames) {
-		auto currFunc = Function::Create(helperFuncTy,
-						 Function::ExternalLinkage,
-						 name, jitModule.get());
+		Function *currFunc = Function::Create(
+			helperFuncTy,
+			is_gpu ? Function::LinkageTypes::ExternalLinkage :
+				  Function::ExternalLinkage,
+			name, jitModule.get());
 		extFunc[name] = currFunc;
 	}
 	std::vector<bool> blockBegin(insts.size(), false);
@@ -155,25 +161,35 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		if (is_imm_jmp(curr)) {
 			SPDLOG_TRACE("mark {} block begin", i + curr.imm + 1);
 			blockBegin[i + curr.imm + 1] = true;
-		} else if (is_jmp(curr)) {
+		} else if (is_jmp(curr) &&
+			   i + curr.offset + 1 < blockBegin.size()) {
 			SPDLOG_TRACE("mark {} block begin",
 				     i + curr.offset + 1);
 			blockBegin[i + curr.offset + 1] = true;
 		}
 	}
-
+	FunctionType *func_ty;
+	if (main_func_with_arguments) {
+		// For SPIR-V/CUDA, use address space 1 (Global) for kernel parameters
+		// For regular JIT, use default address space (0)
+		unsigned addrSpace = is_gpu ? 1 : 0;
+		func_ty = FunctionType::get(
+			is_gpu ? Type::getVoidTy(*context) :
+				  Type::getInt64Ty(*context),
+			{ llvm::PointerType::get(
+				  llvm::Type::getInt8Ty(*context),
+				  addrSpace),
+			  Type::getInt64Ty(*context) },
+			false);
+	} else {
+		func_ty =
+			FunctionType::get(is_gpu ? Type::getVoidTy(*context) :
+						    Type::getInt64Ty(*context),
+					  {}, false);
+	}
 	// The main function
 	Function *bpf_func = Function::Create(
-		FunctionType::get(Type::getInt64Ty(*context),
-				  { llvm::PointerType::getUnqual(
-					    llvm::Type::getInt8Ty(*context)),
-				    Type::getInt64Ty(*context) },
-				  false),
-		Function::ExternalLinkage, "bpf_main", jitModule.get());
-
-	// Get args of uint64_t bpf_main(uint64_t, uint64_t)
-	llvm::Argument *mem = bpf_func->getArg(0);
-	llvm::Argument *mem_len = bpf_func->getArg(1);
+		func_ty, Function::ExternalLinkage, func_name, jitModule.get());
 
 	std::vector<Value *> regs;
 	std::vector<Value *> fregs; /* floating point registers */
@@ -198,29 +214,57 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		}
 
 		// Create stack
-		auto stackBegin = builder.CreateAlloca(
-			builder.getInt64Ty(),
-			builder.getInt32(STACK_SIZE * MAX_LOCAL_FUNC_DEPTH +
-					 10),
-			"stackBegin");
+		// For SPIR-V/CUDA, use array type to avoid VLA issues
+		llvm::Value *stackBegin;
+		if (is_gpu) {
+			auto stackArrayTy = llvm::ArrayType::get(
+				builder.getInt64Ty(),
+				STACK_SIZE * MAX_LOCAL_FUNC_DEPTH + 10);
+			stackBegin = builder.CreateAlloca(stackArrayTy,
+							   nullptr,
+							   "stackBegin");
+		} else {
+			stackBegin = builder.CreateAlloca(
+				builder.getInt64Ty(),
+				builder.getInt32(STACK_SIZE *
+							 MAX_LOCAL_FUNC_DEPTH +
+						 10),
+				"stackBegin");
+		}
 		auto stackEnd = builder.CreateGEP(
 			builder.getInt64Ty(), stackBegin,
 			{ builder.getInt32(STACK_SIZE * MAX_LOCAL_FUNC_DEPTH) },
 			"stackEnd");
 		// Write stack pointer into r10
 		builder.CreateStore(stackEnd, regs[10]);
-		// Write memory address into r1
-		builder.CreateStore(mem, regs[1]);
-		// Write memory len into r1
-		builder.CreateStore(mem_len, regs[2]);
 
-		callStack = builder.CreateAlloca(
-			builder.getPtrTy(),
-			builder.getInt32(CALL_STACK_SIZE * 5), "callStack");
+		if (is_gpu) {
+			auto callStackArrayTy = llvm::ArrayType::get(
+				builder.getPtrTy(), CALL_STACK_SIZE * 5);
+			callStack = builder.CreateAlloca(callStackArrayTy,
+							  nullptr,
+							  "callStack");
+		} else {
+			callStack = builder.CreateAlloca(
+				builder.getPtrTy(),
+				builder.getInt32(CALL_STACK_SIZE * 5),
+				"callStack");
+		}
 		callItemCnt = builder.CreateAlloca(builder.getInt64Ty(),
 						   nullptr, "callItemCnt");
 		builder.CreateStore(builder.getInt64(0), callItemCnt);
+		if (main_func_with_arguments) {
+			// Get args of uint64_t bpf_main(uint64_t, uint64_t)
+			llvm::Argument *mem = bpf_func->getArg(0);
+			llvm::Argument *mem_len = bpf_func->getArg(1);
+
+			// Write memory address into r1
+			builder.CreateStore(mem, regs[1]);
+			// Write memory len into r1
+			builder.CreateStore(mem_len, regs[2]);
+		}
 	}
+
 	// These blocks are the next instructions of the returning target of
 	// local functions
 	std::map<uint16_t, BlockAddress *> localFuncRetBlks;
@@ -260,8 +304,12 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 
 	{
 		IRBuilder<> builder(exitBlk);
-		builder.CreateRet(
-			builder.CreateLoad(builder.getInt64Ty(), regs[0]));
+		if (is_gpu) {
+			builder.CreateRetVoid();
+		} else {
+			builder.CreateRet(builder.CreateLoad(
+				builder.getInt64Ty(), regs[0]));
+		}
 	}
 
 	// Basic blocks that handle the returning of local func
@@ -933,26 +981,29 @@ According to eBPF docs, it should actually be sign-extended to
 			uint64_t val =
 				(uint64_t)((uint32_t)inst.imm) |
 				(((uint64_t)((uint32_t)nextinst.imm)) << 32);
+			SPDLOG_DEBUG(
+				"Load LDDW val= {} part1={:x} part2={:x} src={} pc={}",
+				val, (uint64_t)inst.imm, (uint64_t)nextinst.imm,
+				(int)inst.src, pc);
 			pc++;
+			auto raw_pc = pc - 1;
 
-			SPDLOG_DEBUG("Load LDDW val= {} part1={:x} part2={:x}",
-				     val, (uint64_t)inst.imm,
-				     (uint64_t)nextinst.imm);
 			if (inst.src == 0) {
-				SPDLOG_DEBUG("Emit lddw helper 0 at pc {}", pc);
+				SPDLOG_DEBUG("Emit lddw helper 0 at pc {}",
+					     raw_pc);
 				builder.CreateStore(builder.getInt64(val),
 						    regs[inst.dst]);
 			} else if (inst.src == 1) {
 				SPDLOG_DEBUG(
 					"Emit lddw helper 1 (map_by_fd) at pc {}, imm={}, patched at compile time",
-					pc, inst.imm);
+					raw_pc, inst.imm);
 				if (vm.map_by_fd) {
 					builder.CreateStore(
 						builder.getInt64(
 							vm.map_by_fd(inst.imm)),
 						regs[inst.dst]);
 				} else {
-					SPDLOG_INFO(
+					SPDLOG_DEBUG(
 						"map_by_fd is called in eBPF code, but is not provided, will use the default behavior");
 					// Default: input value
 					builder.CreateStore(
@@ -964,12 +1015,12 @@ According to eBPF docs, it should actually be sign-extended to
 			} else if (inst.src == 2) {
 				SPDLOG_DEBUG(
 					"Emit lddw helper 2 (map_by_fd + map_val) at pc {}, imm1={}, imm2={}",
-					pc, inst.imm, nextinst.imm);
+					raw_pc, inst.imm, nextinst.imm);
 				uint64_t mapPtr;
 				if (vm.map_by_fd) {
 					mapPtr = vm.map_by_fd(inst.imm);
 				} else {
-					SPDLOG_INFO(
+					SPDLOG_DEBUG(
 						"map_by_fd is called in eBPF code, but is not provided, will use the default behavior");
 					// Default: returns the
 					// input value
@@ -983,7 +1034,7 @@ According to eBPF docs, it should actually be sign-extended to
 							llvm::StringError>(
 							"map_val is not provided, unable to compile at pc " +
 								std::to_string(
-									pc),
+									raw_pc),
 							llvm::inconvertibleErrorCode());
 					}
 					builder.CreateStore(
@@ -1015,7 +1066,7 @@ According to eBPF docs, it should actually be sign-extended to
 							llvm::StringError>(
 							"Using lddw helper 2, which requires map_val to be defined at pc " +
 								std::to_string(
-									pc),
+									raw_pc),
 							llvm::inconvertibleErrorCode());
 					}
 				}
@@ -1023,12 +1074,12 @@ According to eBPF docs, it should actually be sign-extended to
 			} else if (inst.src == 3) {
 				SPDLOG_DEBUG(
 					"Emit lddw helper 3 (var_addr) at pc {}, imm1={}",
-					pc, inst.imm);
+					raw_pc, inst.imm);
 				if (!vm.var_addr) {
 					return llvm::make_error<
 						llvm::StringError>(
 						"var_addr is not provided, unable to compile at pc " +
-							std::to_string(pc),
+							std::to_string(raw_pc),
 						llvm::inconvertibleErrorCode());
 				}
 				builder.CreateStore(
@@ -1037,12 +1088,12 @@ According to eBPF docs, it should actually be sign-extended to
 			} else if (inst.src == 4) {
 				SPDLOG_DEBUG(
 					"Emit lddw helper 4 (code_addr) at pc {}, imm1={}",
-					pc, inst.imm);
+					raw_pc, inst.imm);
 				if (!vm.code_addr) {
 					return llvm::make_error<
 						llvm::StringError>(
 						"code_addr is not provided, unable to compile at pc " +
-							std::to_string(pc),
+							std::to_string(raw_pc),
 						llvm::inconvertibleErrorCode());
 				}
 				builder.CreateStore(
@@ -1052,7 +1103,7 @@ According to eBPF docs, it should actually be sign-extended to
 			} else if (inst.src == 5) {
 				SPDLOG_DEBUG(
 					"Emit lddw helper 4 (map_by_idx) at pc {}, imm1={}",
-					pc, inst.imm);
+					raw_pc, inst.imm);
 				if (vm.map_by_idx) {
 					builder.CreateStore(
 						builder.getInt64(vm.map_by_idx(
@@ -1072,7 +1123,7 @@ According to eBPF docs, it should actually be sign-extended to
 			} else if (inst.src == 6) {
 				SPDLOG_DEBUG(
 					"Emit lddw helper 6 (map_by_idx + map_val) at pc {}, imm1={}, imm2={}",
-					pc, inst.imm, nextinst.imm);
+					raw_pc, inst.imm, nextinst.imm);
 
 				uint64_t mapPtr;
 				if (vm.map_by_idx) {
@@ -1099,7 +1150,7 @@ According to eBPF docs, it should actually be sign-extended to
 							llvm::StringError>(
 							"map_val is not provided, unable to compile at pc " +
 								std::to_string(
-									pc),
+									raw_pc),
 							llvm::inconvertibleErrorCode());
 					}
 
@@ -1127,7 +1178,7 @@ According to eBPF docs, it should actually be sign-extended to
 							llvm::StringError>(
 							"Using lddw helper 6 at pc " +
 								std::to_string(
-									pc),
+									raw_pc),
 							llvm::inconvertibleErrorCode());
 					}
 				}
@@ -1486,21 +1537,7 @@ According to eBPF docs, it should actually be sign-extended to
 			builder.CreateBr(allBlocks[i + 1]);
 		}
 	}
-
-	// For every basic block, print each instruction from
-	// its iterator
-	for (size_t i = 0; i < allBlocks.size(); i++) {
-		auto &currBlk = allBlocks[i];
-		std::string str;
-		llvm::raw_string_ostream rso(str);
-		currBlk->print(rso);
-		printf("%s\n", str.c_str());
-	}
-
-	std::string buffer;
-	llvm::raw_string_ostream stream(buffer);
-	if (verifyModule(*jitModule, &stream)) {
-		SPDLOG_ERROR("Failed to verify module: {}", buffer);
+	if (!is_gpu && verifyModule(*jitModule, &dbgs())) {
 		return llvm::make_error<llvm::StringError>(
 			"Invalid module generated",
 			llvm::inconvertibleErrorCode());

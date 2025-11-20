@@ -145,7 +145,7 @@ static int run_ebpf_program(const std::filesystem::path &elf,
 
 	llvmbpf_vm vm;
 	vm.register_external_function(6, "bpf_trace_printk",
-					      (void *)bpftime_trace_printk);
+				      (void *)bpftime_trace_printk);
 	auto func = vm.load_aot_object(file_buffer);
 	if (!func) {
 		SPDLOG_CRITICAL("Failed to load AOT object from ELF file: {}",
@@ -199,7 +199,6 @@ static int run_ebpf_program(const std::filesystem::path &elf,
 int main(int argc, const char **argv)
 {
 	spdlog::cfg::load_env_levels();
-
 	// Check for at least one argument (the command)
 	if (argc < 2) {
 		print_usage(argv[0]);
