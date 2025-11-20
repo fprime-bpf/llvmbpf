@@ -4,6 +4,7 @@
  * All rights reserved.
  */
 
+#include <llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h>
 #ifdef WIN32
 #pragma warning(disable : 4141 4244 4291 4146 4267 4275 4624 4800)
 #endif
@@ -30,7 +31,6 @@
 #else
 #include <llvm/Support/Host.h>
 #endif
-#include <llvm/Support/ManagedStatic.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/TargetSelect.h>
@@ -145,8 +145,22 @@
 #include "llvm/IR/Module.h"
 #include <llvm/ExecutionEngine/JITSymbol.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
+// Prefer feature-detection over hardcoding LLVM_VERSION_MAJOR here.
+// These ORC headers (DynamicLibrarySearchGenerator vs ExecutionUtils) moved
+// between LLVM releases. Using __has_include keeps the code resilient across
+// minor/packaging differences without forcing a specific version guard.
+#if defined(__has_include)
+#  if __has_include(<llvm/ExecutionEngine/Orc/DynamicLibrarySearchGenerator.h>)
+#    include <llvm/ExecutionEngine/Orc/DynamicLibrarySearchGenerator.h>
+#    define BPFTIME_HAVE_ORC_DYNLIB_SEARCH_GEN 1
+#  elif __has_include(<llvm/ExecutionEngine/Orc/ExecutionUtils.h>)
+#    include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
+#    define BPFTIME_HAVE_ORC_EXECUTIONUTILS 1
+#  endif
+#endif
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Support/Error.h>
+#include <llvm/Support/DynamicLibrary.h>
 #include <llvm/ExecutionEngine/JITSymbol.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/Transforms/IPO.h>
@@ -236,8 +250,11 @@ llvm_bpf_jit_context::llvm_bpf_jit_context(llvmbpf_vm &vm) : vm(vm)
 	if (__atomic_compare_exchange_n(&llvm_initialized, &zero, 1, false,
 					__ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
 		SPDLOG_DEBUG("Initializing llvm");
-		InitializeNativeTarget();
-		InitializeNativeTargetAsmPrinter();
+		llvm::InitializeAllTargetInfos();
+		llvm::InitializeAllTargets();
+		llvm::InitializeAllTargetMCs();
+		llvm::InitializeAllAsmPrinters();
+		llvm::InitializeAllAsmParsers();
 	}
 	compiling = std::make_unique<pthread_spinlock_t>();
 	pthread_spin_init(compiling.get(), PTHREAD_PROCESS_PRIVATE);
@@ -416,22 +433,67 @@ llvm_bpf_jit_context::load_aot_object(const std::vector<uint8_t> &buf)
 	this->get_entry_address();
 	return llvm::Error::success();
 }
-
 std::tuple<std::unique_ptr<llvm::orc::LLJIT>, std::vector<std::string>,
-	   std::vector<std::string> >
+	   std::vector<std::string>>
 llvm_bpf_jit_context::create_and_initialize_lljit_instance()
 {
+	static ExitOnError exitOnErr;
 	// Create a JIT builder
 	SPDLOG_DEBUG("LLVM-JIT: Creating LLJIT instance");
+    // Preload libLLVM before creating LLJIT so that ORC runtime wrapper symbols
+    // (e.g. llvm_orc_registerEHFrameSectionWrapper) are visible during create.
+    // Allow overriding SONAME via environment variable BPFTIME_LLVM_SONAME.
+    {
+        const char *envSoname = ::getenv("BPFTIME_LLVM_SONAME");
+        const char *candidates[] = {
+            envSoname && envSoname[0] ? envSoname : (const char *)nullptr,
+            "libLLVM-17.so",
+            "libLLVM.so",
+            "libLLVM-17.0.6.so",
+        };
+        for (const char *name : candidates) {
+            if (!name) {
+                SPDLOG_DEBUG("LLVM-JIT: skipping empty LLVM SONAME candidate");
+                continue;
+            }
+            auto ok = llvm::sys::DynamicLibrary::LoadLibraryPermanently(name);
+            if (!ok) {
+                SPDLOG_DEBUG("LLVM-JIT: failed to preload {} for ORC runtime wrappers", name);
+            }
+            if (llvm::sys::DynamicLibrary::SearchForAddressOfSymbol("llvm_orc_registerEHFrameSectionWrapper")) {
+                SPDLOG_DEBUG("LLVM-JIT: preloaded {} for ORC runtime wrappers", name);
+                break;
+            }
+        }
+    }
 	auto jit_err = LLJITBuilder().create();
 	if (!jit_err) {
-		auto err = jit_err.takeError();
-    SPDLOG_ERROR(llvm::toString(std::move(err)));
+		exitOnErr(jit_err.takeError());
 		return std::make_tuple(nullptr, std::vector<std::string>{},
 				       std::vector<std::string>{});
 	}
 	auto jit = std::move(*jit_err);
 
+	// Make current process symbols visible to the JIT if supported
+#if BPFTIME_HAVE_ORC_DYNLIB_SEARCH_GEN
+	{
+		auto &jd = jit->getMainJITDylib();
+		auto gen = llvm::cantFail(
+			llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
+				jit->getDataLayout().getGlobalPrefix()));
+		jd.addGenerator(std::move(gen));
+	}
+#elif BPFTIME_HAVE_ORC_EXECUTIONUTILS
+	{
+		auto &jd = jit->getMainJITDylib();
+		auto gen = llvm::cantFail(
+			llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
+				jit->getDataLayout().getGlobalPrefix()));
+		jd.addGenerator(std::move(gen));
+	}
+#else
+	(void)0;
+#endif
 	auto &mainDylib = jit->getMainJITDylib();
 	std::vector<std::string> extFuncNames;
 	// insert the helper functions
@@ -463,7 +525,7 @@ llvm_bpf_jit_context::create_and_initialize_lljit_instance()
 		jit->getExecutionSession().intern("__aeabi_unwind_cpp_pr1"),
 		JITEvaluatedSymbol::fromPointer(__aeabi_unwind_cpp_pr1));
 #endif
-	if (auto err = mainDylib.define(absoluteSymbols(extSymbols)); !err) {
+	if (auto err = mainDylib.define(absoluteSymbols(extSymbols)); err) {>
 		SPDLOG_DEBUG("LLVM-JIT: failed to define external symbols");
 	}
 	// Define lddw helpers
@@ -502,9 +564,15 @@ llvm_bpf_jit_context::create_and_initialize_lljit_instance()
 	// tryDefineLddwHelper(LDDW_HELPER_MAP_BY_IDX, (void *)vm.map_by_idx);
 	// tryDefineLddwHelper(LDDW_HELPER_CODE_ADDR, (void *)vm.code_addr);
 	// tryDefineLddwHelper(LDDW_HELPER_VAR_ADDR, (void *)vm.var_addr);
-	if (auto err = mainDylib.define(absoluteSymbols(lddwSyms)); !err) {
-		SPDLOG_DEBUG("LLVM-JIT: failed to define lddw helpers symbols");
-	}
+	
+	bool lddwDefinedOK = true;
+	if (auto err = mainDylib.define(absoluteSymbols(lddwSyms)); err) {
+        SPDLOG_DEBUG("LLVM-JIT: failed to define lddw helpers symbols");
+        lddwDefinedOK = false;
+    }
+    if (!lddwDefinedOK) {
+        definedLddwHelpers.clear();
+    }
 	return { std::move(jit), extFuncNames, definedLddwHelpers };
 }
 
@@ -526,4 +594,191 @@ precompiled_ebpf_function llvm_bpf_jit_context::get_entry_address()
 		SPDLOG_DEBUG("LLVM-JIT: Entry func is {:x}", (uintptr_t)addr);
 		return addr;
 	}
+}
+
+static std::unique_ptr<llvm::TargetMachine>
+createNVPTXTargetMachine(const char *target_cpu)
+{
+	std::string error;
+	const llvm::Target *target =
+		llvm::TargetRegistry::lookupTarget("nvptx64", error);
+	if (!target) {
+		throw std::runtime_error("Failed to find NVPTX target: " +
+					 error);
+	}
+
+	llvm::Triple triple("nvptx64-nvidia-cuda");
+
+	llvm::TargetOptions options;
+	options.FloatABIType = llvm::FloatABI::Default;
+	auto result = std::unique_ptr<llvm::TargetMachine>(
+		target->createTargetMachine(triple.str(), target_cpu, "",
+					    options, llvm::Reloc::Static));
+	return result;
+}
+std::optional<std::string>
+llvm_bpf_jit_context::generate_ptx(bool main_with_arguments,
+				   const std::string &func_name,
+				   const char *target_cpu)
+{
+	static ExitOnError exitOnErr;
+	spin_lock_guard guard(compiling.get());
+	auto targetMachine = createNVPTXTargetMachine(target_cpu);
+	std::vector<std::string> extFuncNames;
+	for (uint32_t i = 0; i < std::size(vm.ext_funcs); i++) {
+		if (vm.ext_funcs[i].has_value()) {
+			extFuncNames.push_back(ext_func_sym(i));
+		}
+	}
+	std::vector<std::string> definedLddwHelpers;
+	const auto tryDefineLddwHelper = [&](const char *name, void *func) {
+		if (func) {
+			SPDLOG_DEBUG("Defining LDDW helper {} with addr {:x}",
+				     name, (uintptr_t)func);
+			definedLddwHelpers.push_back(name);
+		}
+	};
+	// Only map_val will have a chance to be called at runtime, so it's the
+	// only symbol to be defined
+	tryDefineLddwHelper(LDDW_HELPER_MAP_VAL, (void *)vm.map_val);
+	// These symbols won't be used at runtime, because we have already
+	// do relocation when loading the eBPF bytecode
+	// tryDefineLddwHelper(LDDW_HELPER_MAP_BY_FD, (void *)vm.map_by_fd);
+	// tryDefineLddwHelper(LDDW_HELPER_MAP_BY_IDX, (void *)vm.map_by_idx);
+	// tryDefineLddwHelper(LDDW_HELPER_CODE_ADDR, (void *)vm.code_addr);
+	// tryDefineLddwHelper(LDDW_HELPER_VAR_ADDR, (void *)vm.var_addr);
+
+	auto bpfModuleOrErr =
+		generateModule(extFuncNames, definedLddwHelpers, true,
+			       main_with_arguments, func_name, true);
+	if (!bpfModuleOrErr) {
+		exitOnErr(bpfModuleOrErr.takeError());
+		return {};
+	}
+
+	// If successful, get the module
+	auto bpfModule = std::move(*bpfModuleOrErr);
+	// Optimize the module
+	return bpfModule.withModuleDo([&](auto &M) {
+		M.setDataLayout(targetMachine->createDataLayout());
+		optimizeModule(M);
+
+		llvm::legacy::PassManager passManager;
+#if LLVM_VERSION_MAJOR > 17
+		CodeGenFileType fileType = CodeGenFileType::AssemblyFile;
+#else
+		CodeGenFileType fileType = llvm::CGFT_AssemblyFile;
+
+#endif
+		SmallVector<char, 0> objStream;
+		std::unique_ptr<raw_svector_ostream> BOS =
+			std::make_unique<raw_svector_ostream>(objStream);
+
+		if (targetMachine->addPassesToEmitFile(passManager, *BOS,
+						       nullptr, fileType)) {
+			throw std::runtime_error(
+				"TargetMachine cannot emit a file of this type");
+		}
+
+		passManager.run(M);
+		std::string result(objStream.begin(), objStream.end());
+
+		return result;
+	});
+}
+
+static std::unique_ptr<llvm::TargetMachine>
+createSPIRVTargetMachine(const char *target_cpu)
+{
+	std::string error;
+	const llvm::Target *target =
+		llvm::TargetRegistry::lookupTarget("spirv64", error);
+	if (!target) {
+		throw std::runtime_error("Failed to find SPIR-V target: " +
+					 error);
+	}
+
+	llvm::Triple triple("spirv64-unknown-unknown");
+
+	llvm::TargetOptions options;
+	options.FloatABIType = llvm::FloatABI::Default;
+	auto result = std::unique_ptr<llvm::TargetMachine>(
+		target->createTargetMachine(triple.str(), target_cpu, "",
+					    options, llvm::Reloc::Static));
+	return result;
+}
+
+std::optional<std::vector<uint8_t>>
+llvm_bpf_jit_context::generate_spirv(bool main_with_arguments,
+				     const std::string &func_name,
+				     const char *target_env)
+{
+	// target_env can specify SPIR-V environment (e.g., "opencl2.0", "vulkan1.2")
+	// Currently passed to LLVM target machine creation for future extensibility
+	static ExitOnError exitOnErr;
+	spin_lock_guard guard(compiling.get());
+	auto targetMachine = createSPIRVTargetMachine(target_env);
+	std::vector<std::string> extFuncNames;
+	for (uint32_t i = 0; i < std::size(vm.ext_funcs); i++) {
+		if (vm.ext_funcs[i].has_value()) {
+			extFuncNames.push_back(ext_func_sym(i));
+		}
+	}
+	std::vector<std::string> definedLddwHelpers;
+	const auto tryDefineLddwHelper = [&](const char *name, void *func) {
+		if (func) {
+			SPDLOG_DEBUG("Defining LDDW helper {} with addr {:x}",
+				     name, (uintptr_t)func);
+			definedLddwHelpers.push_back(name);
+		}
+	};
+	// Only map_val will have a chance to be called at runtime, so it's the
+	// only symbol to be defined
+	tryDefineLddwHelper(LDDW_HELPER_MAP_VAL, (void *)vm.map_val);
+	// These symbols won't be used at runtime, because we have already
+	// do relocation when loading the eBPF bytecode
+	// tryDefineLddwHelper(LDDW_HELPER_MAP_BY_FD, (void *)vm.map_by_fd);
+	// tryDefineLddwHelper(LDDW_HELPER_MAP_BY_IDX, (void *)vm.map_by_idx);
+	// tryDefineLddwHelper(LDDW_HELPER_CODE_ADDR, (void *)vm.code_addr);
+	// tryDefineLddwHelper(LDDW_HELPER_VAR_ADDR, (void *)vm.var_addr);
+
+	auto bpfModuleOrErr =
+		generateModule(extFuncNames, definedLddwHelpers, true,
+			       main_with_arguments, func_name, true);
+	if (!bpfModuleOrErr) {
+		exitOnErr(bpfModuleOrErr.takeError());
+		return {};
+	}
+
+	// If successful, get the module
+	auto bpfModule = std::move(*bpfModuleOrErr);
+	// Optimize the module
+	return bpfModule.withModuleDo([&](auto &M) -> std::optional<std::vector<uint8_t>> {
+		M.setDataLayout(targetMachine->createDataLayout());
+
+		// Run optimizations to clean up unreachable blocks and simplify code
+		optimizeModule(M);
+
+		llvm::legacy::PassManager passManager;
+#if LLVM_VERSION_MAJOR > 17
+		CodeGenFileType fileType = CodeGenFileType::ObjectFile;
+#else
+		CodeGenFileType fileType = llvm::CGFT_ObjectFile;
+#endif
+		SmallVector<char, 0> objStream;
+		std::unique_ptr<raw_svector_ostream> BOS =
+			std::make_unique<raw_svector_ostream>(objStream);
+
+		if (targetMachine->addPassesToEmitFile(passManager, *BOS,
+						       nullptr, fileType)) {
+			SPDLOG_ERROR(
+				"TargetMachine cannot emit a SPIR-V file of this type");
+			return {};
+		}
+
+		passManager.run(M);
+		std::vector<uint8_t> result(objStream.begin(), objStream.end());
+
+		return result;
+	});
 }
