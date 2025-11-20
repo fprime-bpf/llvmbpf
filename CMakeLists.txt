@@ -79,20 +79,7 @@ else()
         RuntimeDyld
         OrcJIT
         MCJIT
-        # X86
-        X86CodeGen
-        X86Desc
-        X86Info
-        X86AsmParser
-        # NVPTX
-        NVPTXCodeGen
-        NVPTXDesc
-        NVPTXInfo
-        # AArch64
-        AArch64CodeGen
-        AArch64Desc
-        AArch64Info
-        AArch64AsmParser
+        nativecodegen
     )
 
     # Add SPIR-V components only if SPIR-V is enabled and LLVM version supports it
