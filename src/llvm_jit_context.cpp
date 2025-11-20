@@ -525,7 +525,7 @@ llvm_bpf_jit_context::create_and_initialize_lljit_instance()
 		jit->getExecutionSession().intern("__aeabi_unwind_cpp_pr1"),
 		JITEvaluatedSymbol::fromPointer(__aeabi_unwind_cpp_pr1));
 #endif
-	if (auto err = mainDylib.define(absoluteSymbols(extSymbols)); err) {>
+	if (auto err = mainDylib.define(absoluteSymbols(extSymbols)); err) {
 		SPDLOG_DEBUG("LLVM-JIT: failed to define external symbols");
 	}
 	// Define lddw helpers
