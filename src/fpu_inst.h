@@ -113,8 +113,8 @@ inline bool duo_is_fpu(const ebpf_inst &inst)
 
 	/* FMOV instructions:
 	 * Are uniquely FPUs as FMEM isn't used elsewhere */
-	if (duo_opcode(inst) == FMEM)
-		return true;
+	if (inst.opcode == DUO_OP_FST || inst.opcode == DUO_OP_FSTX || inst.opcode == DUO_OP_FLDX)
+      return true;
 
 	/* FALU:
 	 * 1st bit of offset is set */
