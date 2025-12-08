@@ -56,6 +56,7 @@ endif()
 
 option(ENABLE_LLVM_SHARED "Link shared library of LLVM" NO)
 option(BUILD_LLVM_AOT_CLI "Build AOT cli, which rely on libbpf" NO)
+option(BPFTIME_ENABLE_LLVM_PRELOAD "Enable openEuler-specific LLVM preload workaround" OFF)
 
 if(ENABLE_LLVM_SHARED)
     list(PREPEND LLVM_LIBS LLVM)
@@ -147,6 +148,23 @@ target_include_directories(llvmbpf_vm
     PRIVATE ${LLVM_INCLUDE_DIRS} ${SPDLOG_INCLUDE} ${Boost_INCLUDE} ../include include # LLVM jit also used these headers
 )
 add_dependencies(llvmbpf_vm spdlog::spdlog)
+if(BPFTIME_ENABLE_LLVM_PRELOAD)
+    target_compile_definitions(llvmbpf_vm PRIVATE BPFTIME_ENABLE_LLVM_PRELOAD=1)
+endif()
+
+# SPIR-V support requires LLVM 18+ (native backend in LLVM 20+)
+if(LLVMBPF_ENABLE_SPIRV)
+    if(${LLVM_VERSION_MAJOR} LESS 18)
+        message(FATAL_ERROR "SPIR-V support requires LLVM 18 or higher. Current version: ${LLVM_VERSION_MAJOR}.${LLVM_VERSION_MINOR}")
+    endif()
+    if(${LLVM_VERSION_MAJOR} GREATER_EQUAL 20)
+        message(STATUS "SPIR-V: Using native LLVM backend (LLVM ${LLVM_VERSION_MAJOR})")
+    elseif(${LLVM_VERSION_MAJOR} GREATER_EQUAL 18)
+        message(STATUS "SPIR-V: LLVM ${LLVM_VERSION_MAJOR} detected. Native backend available in LLVM 20+")
+        message(STATUS "SPIR-V: Consider upgrading to LLVM 20 for native support")
+    endif()
+    target_compile_definitions(llvmbpf_vm PRIVATE LLVMBPF_HAS_SPIRV=1)
+endif()
 
 # SPIR-V support requires LLVM 18+ (native backend in LLVM 20+)
 if(LLVMBPF_ENABLE_SPIRV)
