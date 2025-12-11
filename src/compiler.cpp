@@ -407,8 +407,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 					 * stack */
 					if (inst.offset != 0 &&
 					    inst.src == 0xa) {
-						std::cout
-							<< "loading off stack..\n";
+						SPDLOG_DEBUG("loading off stack..");
 
 						/* ptr to value off the stack
 						 * We insert regs, not fregs,
