@@ -324,9 +324,19 @@ std::vector<uint8_t> llvm_bpf_jit_context::do_aot_compile(
 				throw std::runtime_error(
 					"Unable to get local target");
 			}
-			auto targetMachine = target->createTargetMachine(
-				defaultTargetTriple, "generic", "",
-				TargetOptions(), Reloc::PIC_);
+			std::string cpu = llvm::sys::getHostCPUName().str();
+
+      llvm::StringMap<bool> featureMap = llvm::sys::getHostCPUFeatures();
+      std::string features;
+      for (auto& f : featureMap)
+          features += (f.second ? "+" : "-") + f.first().str() + ",";
+
+      std::cout << "JIT cpu: " << cpu << std::endl;
+      std::cout << "JIT features: " << features << std::endl;
+
+      auto targetMachine = target->createTargetMachine(
+          defaultTargetTriple, cpu, features,
+          TargetOptions(), Reloc::PIC_, CodeModel::Large);
 			if (!targetMachine) {
 				SPDLOG_ERROR("Unable to create target machine");
 				throw std::runtime_error(
@@ -483,7 +493,24 @@ llvm_bpf_jit_context::create_and_initialize_lljit_instance()
 		}
 	}
 #endif
-	auto jit_err = LLJITBuilder().create();
+  auto JTMB = llvm::orc::JITTargetMachineBuilder::detectHost();
+  if (!JTMB) {
+    exitOnErr(JTMB.takeError());
+  }
+
+  // Override cpu and features on the detected host builder
+  JTMB->setCPU(llvm::sys::getHostCPUName().str());
+
+  llvm::StringMap<bool> featureMap = llvm::sys::getHostCPUFeatures();
+  std::vector<std::string> features;
+  for (auto& f : featureMap)
+      features.push_back((f.second ? "+" : "-") + f.first().str());
+
+  JTMB->setCPU(llvm::sys::getHostCPUName().str());
+  JTMB->addFeatures(features);
+  JTMB->setCodeModel(llvm::CodeModel::Large);
+
+	auto jit_err = LLJITBuilder().setJITTargetMachineBuilder(std::move(*JTMB)).create();
 	if (!jit_err) {
 		exitOnErr(jit_err.takeError());
 		return std::make_tuple(nullptr, std::vector<std::string>{},

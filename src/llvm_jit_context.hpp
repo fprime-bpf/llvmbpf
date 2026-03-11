@@ -28,7 +28,7 @@ const static char *LDDW_HELPER_CODE_ADDR = "__lddw_helper_code_addr";
 
 #define IS_ALIGNED(x, a) (((uintptr_t)(x) & ((a)-1)) == 0)
 
-#define EBPF_STACK_SIZE 40000
+#define EBPF_STACK_SIZE 4450
 
 class llvm_bpf_jit_context {
 	llvmbpf_vm &vm;

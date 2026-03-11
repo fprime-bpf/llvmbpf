@@ -38,7 +38,7 @@ using namespace bpftime;
 const int STACK_SIZE = (EBPF_STACK_SIZE + 7) / 8;
 const int CALL_STACK_SIZE = 128;
 
-const size_t MAX_LOCAL_FUNC_DEPTH = 128;
+const size_t MAX_LOCAL_FUNC_DEPTH = 4;
 
 /*
     How should we compile bpf instructions into a LLVM module?
