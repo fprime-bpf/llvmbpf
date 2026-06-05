@@ -65,7 +65,8 @@
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Object/ModuleSymbolTable.h"
 #include "llvm/Passes/PassBuilder.h"
-#include "llvm/Passes/PassPlugin.h"
+//#include "llvm/Passes/PassPlugin.h"//doesn't work for llvm22
+#include "llvm/Plugins/PassPlugin.h"//new path in 22
 #include "llvm/Passes/StandardInstrumentations.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
@@ -313,7 +314,7 @@ std::vector<uint8_t> llvm_bpf_jit_context::do_aot_compile(
 				module.print(llvm::outs(), nullptr);
 			}
 			optimizeModule(module);
-			module.setTargetTriple(defaultTargetTriple);
+			module.setTargetTriple(llvm::Triple(defaultTargetTriple));
 			std::string error;
 			auto target = TargetRegistry::lookupTarget(
 				defaultTargetTriple, error);
@@ -325,7 +326,7 @@ std::vector<uint8_t> llvm_bpf_jit_context::do_aot_compile(
 					"Unable to get local target");
 			}
 			auto targetMachine = target->createTargetMachine(
-				defaultTargetTriple, "generic", "",
+				llvm::Triple(defaultTargetTriple), "generic", "",
 				TargetOptions(), Reloc::PIC_);
 			if (!targetMachine) {
 				SPDLOG_ERROR("Unable to create target machine");
@@ -643,7 +644,7 @@ createNVPTXTargetMachine(const char *target_cpu)
 	llvm::TargetOptions options;
 	options.FloatABIType = llvm::FloatABI::Default;
 	auto result = std::unique_ptr<llvm::TargetMachine>(
-		target->createTargetMachine(triple.str(), target_cpu, "",
+		target->createTargetMachine(triple, target_cpu, "",
 					    options, llvm::Reloc::Static));
 	return result;
 }
@@ -734,7 +735,7 @@ createSPIRVTargetMachine(const char *target_cpu)
 	llvm::TargetOptions options;
 	options.FloatABIType = llvm::FloatABI::Default;
 	auto result = std::unique_ptr<llvm::TargetMachine>(
-		target->createTargetMachine(triple.str(), target_cpu, "",
+		target->createTargetMachine(triple, target_cpu, "",
 					    options, llvm::Reloc::Static));
 	return result;
 }
