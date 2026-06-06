@@ -64,8 +64,11 @@
 #include "llvm/LTO/LTO.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Object/ModuleSymbolTable.h"
+#if LLVM_VERSION_MAJOR >= 22
 #include "llvm/Passes/PassBuilder.h"
-//#include "llvm/Passes/PassPlugin.h"//doesn't work for llvm22
+#else
+#include "llvm/Passes/PassPlugin.h"
+#endif
 #include "llvm/Plugins/PassPlugin.h"//new path in 22
 #include "llvm/Passes/StandardInstrumentations.h"
 #include "llvm/Support/Error.h"
@@ -347,7 +350,13 @@ std::vector<uint8_t> llvm_bpf_jit_context::do_aot_compile(
 				module.print(llvm::outs(), nullptr);
 			}
 			optimizeModule(module);
-			module.setTargetTriple(llvm::Triple(defaultTargetTriple));
+			module.setTargetTriple(
+#if LLVM_VERSION_MAJOR>=22			
+				llvm::Triple(defaultTargetTriple)
+#else
+defaultTargetTriple
+#endif
+			);
 			std::string error;
 			auto target = TargetRegistry::lookupTarget(
 				defaultTargetTriple, error);
@@ -359,8 +368,12 @@ std::vector<uint8_t> llvm_bpf_jit_context::do_aot_compile(
 					"Unable to get local target");
 			}
 			auto targetMachine = target->createTargetMachine(
-				defaultTargetTriple, targetCPU, targetFeatures,
-				TargetOptions(), Reloc::PIC_);
+#if LLVM_VERSION_MAJOR>=22
+				llvm::Triple(defaultTargetTriple)
+#else
+defaultTargetTriple
+#endif
+				, "generic", "", TargetOptions(), Reloc::PIC_);
 			if (!targetMachine) {
 				SPDLOG_ERROR("Unable to create target machine");
 				throw std::runtime_error(
@@ -691,8 +704,13 @@ createNVPTXTargetMachine(const char *target_cpu)
 	llvm::TargetOptions options;
 	options.FloatABIType = llvm::FloatABI::Default;
 	auto result = std::unique_ptr<llvm::TargetMachine>(
-		target->createTargetMachine(triple, target_cpu, "",
-					    options, llvm::Reloc::Static));
+		target->createTargetMachine(
+#if LLVM_VERSION_MAJOR>=22			
+			triple
+#else
+		triple.str()
+#endif					
+			, target_cpu, "", options, llvm::Reloc::Static));
 	return result;
 }
 std::optional<std::string>
@@ -782,8 +800,12 @@ createSPIRVTargetMachine(const char *target_cpu)
 	llvm::TargetOptions options;
 	options.FloatABIType = llvm::FloatABI::Default;
 	auto result = std::unique_ptr<llvm::TargetMachine>(
-		target->createTargetMachine(triple, target_cpu, "",
-					    options, llvm::Reloc::Static));
+		target->createTargetMachine(triple
+#if LLVM_VERSION_MAJOR<22			
+			.str()
+#endif
+
+			, target_cpu, "",options, llvm::Reloc::Static));
 	return result;
 }
 
