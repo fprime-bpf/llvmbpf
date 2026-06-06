@@ -12,7 +12,28 @@ const unsigned char simple_cond_1[] =
 	"\x00\x00\x00\x63\x1a\xfc\xff\x00\x00\x00\x00\x05\x00\x00\x00\x00\x00\x00\x00\x61\xa0\xfc\xff\x00\x00"
 	"\x00\x00\x95\x00\x00\x00\x00\x00\x00\x00";
 }
-
+/*
+mov64 r1, 1
+stw [r10 - 8], r1
+mov64 r1, 2
+stw [r10 - 12], r1
+ldxw r1, [r10 - 8]
+ldxw r2, [r10 - 12]
+add64 r1, r2
+lsh64 r1, 32
+arsh64 r1, 32
+mov64 r2, 3
+jsgt r1, r2, +4
+ja +0
+mov64 r1, 4
+stw [r10 - 4], r1
+ja +3
+mov64 r1, 5
+stw [r10 - 4], r1
+ja +0
+ldxw r0, [r10 - 4]
+exit
+*/
 TEST_CASE("Instrumented compile stores final register snapshot")
 {
 	bpftime::llvmbpf_vm vm;
