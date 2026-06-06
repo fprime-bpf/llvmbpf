@@ -91,7 +91,8 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	const std::vector<std::string> &extFuncNames,
 	const std::vector<std::string> &lddwHelpers,
 	bool patch_map_val_at_compile_time, bool main_func_with_arguments,
-	const std::string &func_name, bool is_gpu)
+	const std::string &func_name, bool is_gpu,
+	uintptr_t register_state_store_addr)
 {
 	SPDLOG_DEBUG(
 		"Generating module: patch_map_val_at_compile_time={}, with arguments={}, func_name={}, is_gpu={}",
@@ -100,6 +101,13 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	auto context = std::make_unique<LLVMContext>();
 	auto jitModule = std::make_unique<Module>("bpf-jit", *context);
 	const auto &insts = vm.instructions;
+	auto *registerStateStoreTy = Type::getInt64Ty(*context)->getPointerTo();
+	auto *registerStateStoreBase = register_state_store_addr == 0
+		? nullptr
+		: llvm::ConstantExpr::getIntToPtr(
+			llvm::ConstantInt::get(Type::getInt64Ty(*context),
+						 register_state_store_addr),
+			registerStateStoreTy);
 	if (insts.empty()) {
 		return llvm::make_error<llvm::StringError>(
 			"No instructions provided",
@@ -361,6 +369,24 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	// Iterate over instructions
 	BasicBlock *currBB = instBlocks[0];
 	IRBuilder<> builder(currBB);
+	auto emitRegisterSnapshot = [&]() {
+		if (!registerStateStoreBase) {
+			return;
+		}
+		IRBuilder<> snapshotBuilder(*context);
+		if (auto *terminator = currBB->getTerminator()) {
+			snapshotBuilder.SetInsertPoint(terminator);
+		} else {
+			snapshotBuilder.SetInsertPoint(currBB);
+		}
+		for (uint16_t reg = 0; reg < 10; reg++) {
+			auto *slot = snapshotBuilder.CreateGEP(
+				snapshotBuilder.getInt64Ty(), registerStateStoreBase,
+				{ snapshotBuilder.getInt64(reg) });
+			snapshotBuilder.CreateStore(snapshotBuilder.CreateLoad(
+				snapshotBuilder.getInt64Ty(), regs[reg]), slot);
+		}
+	};
 	for (uint16_t pc = 0; pc < insts.size(); pc++) {
 		auto inst = insts[pc];
 		if (blockBegin[pc]) {
@@ -514,6 +540,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			}
 		}
 
+		emitRegisterSnapshot();
 		if (isFPU)
 			continue;
 
@@ -1526,6 +1553,7 @@ According to eBPF docs, it should actually be sign-extended to
 					" at pc " + std::to_string(pc),
 				llvm::inconvertibleErrorCode());
 		}
+		emitRegisterSnapshot();
 	}
 
 	// Add br for all blocks

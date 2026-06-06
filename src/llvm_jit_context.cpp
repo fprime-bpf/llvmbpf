@@ -276,21 +276,41 @@ llvm::Error llvm_bpf_jit_context::do_jit_compile()
 			"jit initialization failed",
 			llvm::inconvertibleErrorCode());
 	}
-	// Handle the error from generateModule
 	auto bpfModuleOrErr =
 		generateModule(extFuncNames, definedLddwHelpers, true);
 	if (!bpfModuleOrErr) {
 		return bpfModuleOrErr.takeError();
 	}
-	// If successful, get the module
 	auto bpfModule = std::move(*bpfModuleOrErr);
-	// Optimize the module
 	bpfModule.withModuleDo([](auto &M) { optimizeModule(M); });
-	// Handle the error from addIRModule
 	if (auto err = jit->addIRModule(std::move(bpfModule))) {
 		return err;
 	}
-	// If everything succeeds, move the JIT instance
+	this->jit = std::move(jit);
+	return llvm::Error::success();
+}
+
+llvm::Error llvm_bpf_jit_context::do_jit_compile(uintptr_t register_state_store_addr)
+{
+	spin_lock_guard guard(compiling.get());
+	auto [jit, extFuncNames, definedLddwHelpers] =
+		create_and_initialize_lljit_instance();
+	if (!jit) {
+		return llvm::make_error<llvm::StringError>(
+			"jit initialization failed",
+			llvm::inconvertibleErrorCode());
+	}
+	auto bpfModuleOrErr = generateModule(
+		extFuncNames, definedLddwHelpers, true, true, "bpf_main", false,
+		register_state_store_addr);
+	if (!bpfModuleOrErr) {
+		return bpfModuleOrErr.takeError();
+	}
+	auto bpfModule = std::move(*bpfModuleOrErr);
+	bpfModule.withModuleDo([](auto &M) { optimizeModule(M); });
+	if (auto err = jit->addIRModule(std::move(bpfModule))) {
+		return err;
+	}
 	this->jit = std::move(jit);
 	return llvm::Error::success();
 }

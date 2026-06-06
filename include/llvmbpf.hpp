@@ -6,6 +6,7 @@
 #include <vector>
 #include <ebpf_inst.h>
 #include <string>
+#include <cstdint>
 
 #ifndef MAX_EXT_FUNCS
 #define MAX_EXT_FUNCS 8192
@@ -18,6 +19,7 @@ struct external_function {
 	std::string name;
 	void *fn;
 };
+using ExeState=uint64_t[10];//stores R0-R9 ebpf registers.
 
 class llvm_bpf_jit_context;
 
@@ -69,6 +71,13 @@ class llvmbpf_vm {
 	// Compile the eBPF program into a JITed function
 	// return the JITed function if success
 	std::optional<precompiled_ebpf_function> compile() noexcept;
+
+	/*
+	The JITed function will be additionally instrumented such that it store values of R0-R9 register after every eBPF instructions that may change them. For example, BPF_ST, BPF_STX, and BPF_ALU* instructions.
+	
+	The compiled function must have write access the provided memory reigon when it's ran. Assume the compiled function will be the only one using it (no race condition with external threads).
+	*/
+	std::optional<precompiled_ebpf_function> compile(const ExeState* store)noexcept;
 
 	// See the spec for details.
 	// If the code involve array map access, the map_val function

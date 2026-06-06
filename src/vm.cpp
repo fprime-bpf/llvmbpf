@@ -108,6 +108,31 @@ std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compile() noexcept
 	}
 }
 
+std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compile(const ExeState *store) noexcept
+{
+	if (jitted_function) {
+		error_msg = "Already compiled";
+		return jitted_function;
+	}
+	try {
+		auto res = jit_ctx->do_jit_compile(reinterpret_cast<uintptr_t>(store));
+		if (res) {
+			LLVMErrorRef llvmError = llvm::wrap(std::move(res));
+			error_msg = LLVMGetErrorMessage(llvmError);
+			SPDLOG_ERROR("LLVM-JIT: failed to compile: {}",
+				     error_msg);
+			return {};
+		}
+		auto func = jit_ctx->get_entry_address();
+		jitted_function = func;
+		return func;
+	} catch (const std::exception &e) {
+		error_msg = e.what();
+		jitted_function = std::nullopt;
+		return {};
+	}
+}
+
 void llvmbpf_vm::set_lddw_helpers(uint64_t (*map_by_fd)(uint32_t),
 				  uint64_t (*map_by_idx)(uint32_t),
 				  uint64_t (*map_val)(uint64_t),
