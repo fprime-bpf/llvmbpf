@@ -64,12 +64,12 @@
 #include "llvm/LTO/LTO.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Object/ModuleSymbolTable.h"
-#if LLVM_VERSION_MAJOR >= 22
 #include "llvm/Passes/PassBuilder.h"
+#if LLVM_VERSION_MAJOR >= 22
+#include "llvm/Plugins/PassPlugin.h"//new path in 22
 #else
 #include "llvm/Passes/PassPlugin.h"
 #endif
-#include "llvm/Plugins/PassPlugin.h"//new path in 22
 #include "llvm/Passes/StandardInstrumentations.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
