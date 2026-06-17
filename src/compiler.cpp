@@ -369,8 +369,11 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	// Iterate over instructions
 	BasicBlock *currBB = instBlocks[0];
 	IRBuilder<> builder(currBB);
-	auto emitRegisterSnapshot = [&]() {
+	auto emitRegisterSnapshot = [&](std::initializer_list<uint16_t> regsToStore) {
 		if (!registerStateStoreBase) {
+			return;
+		}
+		if (regsToStore.size() == 0) {
 			return;
 		}
 		IRBuilder<> snapshotBuilder(*context);
@@ -379,7 +382,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		} else {
 			snapshotBuilder.SetInsertPoint(currBB);
 		}
-		for (uint16_t reg = 0; reg < 10; reg++) {
+		for (uint16_t reg : regsToStore) {
 			auto *slot = snapshotBuilder.CreateGEP(
 				snapshotBuilder.getInt64Ty(), registerStateStoreBase,
 				{ snapshotBuilder.getInt64(reg) });
@@ -540,7 +543,6 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			}
 		}
 
-		emitRegisterSnapshot();
 		if (isFPU)
 			continue;
 
@@ -1209,6 +1211,7 @@ According to eBPF docs, it should actually be sign-extended to
 					}
 				}
 			}
+			emitRegisterSnapshot({ inst.dst });
 			break;
 		}
 			// JMP
@@ -1300,6 +1303,7 @@ According to eBPF docs, it should actually be sign-extended to
 				    !exp) {
 					return exp.takeError();
 				}
+				emitRegisterSnapshot({ 0 });
 			}
 
 			break;
@@ -1458,44 +1462,64 @@ According to eBPF docs, it should actually be sign-extended to
 			switch (inst.imm) {
 			case EBPF_ATOMIC_ADD:
 			case EBPF_ATOMIC_ADD | EBPF_ATOMIC_OP_FETCH: {
+				bool isFetch =
+					(inst.imm & EBPF_ATOMIC_OP_FETCH) ==
+					EBPF_ATOMIC_OP_FETCH;
 				emitAtomicBinOp(
 					builder, &regs[0],
 					llvm::AtomicRMWInst::BinOp::Add, inst,
 					inst.opcode == EBPF_ATOMIC_OPCODE_64,
-					(inst.imm & EBPF_ATOMIC_OP_FETCH) ==
-						EBPF_ATOMIC_OP_FETCH);
+					isFetch);
+				if (isFetch) {
+					emitRegisterSnapshot({ inst.src });
+				}
 				break;
 			}
 
 			case EBPF_ATOMIC_AND:
 			case EBPF_ATOMIC_AND | EBPF_ATOMIC_OP_FETCH: {
+				bool isFetch =
+					(inst.imm & EBPF_ATOMIC_OP_FETCH) ==
+					EBPF_ATOMIC_OP_FETCH;
 				emitAtomicBinOp(
 					builder, &regs[0],
 					llvm::AtomicRMWInst::BinOp::And, inst,
 					inst.opcode == EBPF_ATOMIC_OPCODE_64,
-					(inst.imm & EBPF_ATOMIC_OP_FETCH) ==
-						EBPF_ATOMIC_OP_FETCH);
+					isFetch);
+				if (isFetch) {
+					emitRegisterSnapshot({ inst.src });
+				}
 				break;
 			}
 
 			case EBPF_ATOMIC_OR:
 			case EBPF_ATOMIC_OR | EBPF_ATOMIC_OP_FETCH: {
+				bool isFetch =
+					(inst.imm & EBPF_ATOMIC_OP_FETCH) ==
+					EBPF_ATOMIC_OP_FETCH;
 				emitAtomicBinOp(
 					builder, &regs[0],
 					llvm::AtomicRMWInst::BinOp::Or, inst,
 					inst.opcode == EBPF_ATOMIC_OPCODE_64,
-					(inst.imm & EBPF_ATOMIC_OP_FETCH) ==
-						EBPF_ATOMIC_OP_FETCH);
+					isFetch);
+				if (isFetch) {
+					emitRegisterSnapshot({ inst.src });
+				}
 				break;
 			}
 			case EBPF_ATOMIC_XOR:
 			case EBPF_ATOMIC_XOR | EBPF_ATOMIC_OP_FETCH: {
+				bool isFetch =
+					(inst.imm & EBPF_ATOMIC_OP_FETCH) ==
+					EBPF_ATOMIC_OP_FETCH;
 				emitAtomicBinOp(
 					builder, &regs[0],
 					llvm::AtomicRMWInst::BinOp::Xor, inst,
 					inst.opcode == EBPF_ATOMIC_OPCODE_64,
-					(inst.imm & EBPF_ATOMIC_OP_FETCH) ==
-						EBPF_ATOMIC_OP_FETCH);
+					isFetch);
+				if (isFetch) {
+					emitRegisterSnapshot({ inst.src });
+				}
 				break;
 			}
 			case EBPF_ATOMIC_OP_XCHG: {
@@ -1535,6 +1559,7 @@ According to eBPF docs, it should actually be sign-extended to
 					builder.CreateZExt(beforeVal,
 							   builder.getInt64Ty()),
 					regs[0]);
+				emitRegisterSnapshot({ 0 });
 				break;
 			}
 			default: {
@@ -1553,7 +1578,70 @@ According to eBPF docs, it should actually be sign-extended to
 					" at pc " + std::to_string(pc),
 				llvm::inconvertibleErrorCode());
 		}
-		emitRegisterSnapshot();
+		switch (inst.opcode) {
+		case EBPF_OP_ADD64_IMM:
+		case EBPF_OP_ADD_IMM:
+		case EBPF_OP_ADD64_REG:
+		case EBPF_OP_ADD_REG:
+		case EBPF_OP_SUB64_IMM:
+		case EBPF_OP_SUB_IMM:
+		case EBPF_OP_SUB64_REG:
+		case EBPF_OP_SUB_REG:
+		case EBPF_OP_MUL64_IMM:
+		case EBPF_OP_MUL_IMM:
+		case EBPF_OP_MUL64_REG:
+		case EBPF_OP_MUL_REG:
+		case EBPF_OP_DIV64_IMM:
+		case EBPF_OP_DIV_IMM:
+		case EBPF_OP_DIV64_REG:
+		case EBPF_OP_DIV_REG:
+		case EBPF_OP_OR64_IMM:
+		case EBPF_OP_OR_IMM:
+		case EBPF_OP_OR64_REG:
+		case EBPF_OP_OR_REG:
+		case EBPF_OP_AND64_IMM:
+		case EBPF_OP_AND_IMM:
+		case EBPF_OP_AND64_REG:
+		case EBPF_OP_AND_REG:
+		case EBPF_OP_LSH64_IMM:
+		case EBPF_OP_LSH_IMM:
+		case EBPF_OP_LSH64_REG:
+		case EBPF_OP_LSH_REG:
+		case EBPF_OP_RSH64_IMM:
+		case EBPF_OP_RSH_IMM:
+		case EBPF_OP_RSH64_REG:
+		case EBPF_OP_RSH_REG:
+		case EBPF_OP_NEG:
+		case EBPF_OP_NEG64:
+		case EBPF_OP_MOD64_IMM:
+		case EBPF_OP_MOD_IMM:
+		case EBPF_OP_MOD64_REG:
+		case EBPF_OP_MOD_REG:
+		case EBPF_OP_XOR64_IMM:
+		case EBPF_OP_XOR_IMM:
+		case EBPF_OP_XOR64_REG:
+		case EBPF_OP_XOR_REG:
+		case EBPF_OP_MOV64_IMM:
+		case EBPF_OP_MOV_IMM:
+		case EBPF_OP_MOV64_REG:
+		case EBPF_OP_MOV_REG:
+		case EBPF_OP_ARSH64_IMM:
+		case EBPF_OP_ARSH_IMM:
+		case EBPF_OP_ARSH64_REG:
+		case EBPF_OP_ARSH_REG:
+		case EBPF_OP_LE:
+		case EBPF_OP_BE:
+		case EBPF_OP_BYTESWAP:
+		case EBPF_OP_LDXB:
+		case EBPF_OP_LDXH:
+		case EBPF_OP_LDXW:
+		case EBPF_OP_LDXDW: {
+			emitRegisterSnapshot({ inst.dst });
+			break;
+		}
+		default:
+			break;
+		}
 	}
 
 	// Add br for all blocks
