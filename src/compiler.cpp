@@ -169,6 +169,11 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		if (is_imm_jmp(curr)) {
 			SPDLOG_TRACE("mark {} block begin", i + curr.imm + 1);
 			blockBegin[i + curr.imm + 1] = true;
+		} else if (curr.opcode == EBPF_OP_CALL && curr.src == 0x1 &&
+			   i + curr.imm + 1 < blockBegin.size()) {
+			SPDLOG_TRACE("mark {} local call target block begin",
+				     i + curr.imm + 1);
+			blockBegin[i + curr.imm + 1] = true;
 		} else if (is_jmp(curr) &&
 			   i + curr.offset + 1 < blockBegin.size()) {
 			SPDLOG_TRACE("mark {} block begin",
@@ -308,6 +313,24 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		}
 	}
 
+	auto emitRegisterSnapshot =
+		[&](IRBuilder<> &snapshotBuilder,
+		    std::initializer_list<uint16_t> regsToStore) {
+		if (!registerStateStoreBase) {
+			return;
+		}
+		if (regsToStore.size() == 0) {
+			return;
+		}
+		for (uint16_t reg : regsToStore) {
+			auto *slot = snapshotBuilder.CreateGEP(
+				snapshotBuilder.getInt64Ty(), registerStateStoreBase,
+				{ snapshotBuilder.getInt64(reg) });
+			snapshotBuilder.CreateStore(snapshotBuilder.CreateLoad(
+				snapshotBuilder.getInt64Ty(), regs[reg]), slot);
+		}
+	};
+
 	// Basic block used to exit the eBPF program
 	// will read r0 and return it
 	BasicBlock *exitBlk =
@@ -315,6 +338,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 
 	{
 		IRBuilder<> builder(exitBlk);
+		emitRegisterSnapshot(builder, { 0 });
 		if (is_gpu) {
 			builder.CreateRetVoid();
 		} else {
@@ -364,6 +388,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 						   regs[10]),
 				builder.getInt64(STACK_SIZE)),
 			regs[10]);
+		emitRegisterSnapshot(builder, { 0 });
 		auto indrBr = builder.CreateIndirectBr(targetAddr);
 		for (const auto &item : localFuncRetBlks) {
 			indrBr->addDestination(instBlocks[item.first]);
@@ -372,21 +397,39 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	// Iterate over instructions
 	BasicBlock *currBB = instBlocks[0];
 	IRBuilder<> builder(currBB);
-	auto emitRegisterSnapshot =
-		[&](IRBuilder<> &snapshotBuilder,
+	auto buildSnapshotEdge =
+		[&](BasicBlock *dst, const std::string &name,
 		    std::initializer_list<uint16_t> regsToStore) {
-		if (!registerStateStoreBase) {
-			return;
+		if (!registerStateStoreBase || regsToStore.size() == 0) {
+			return dst;
 		}
-		if (regsToStore.size() == 0) {
-			return;
-		}
-		for (uint16_t reg : regsToStore) {
-			auto *slot = snapshotBuilder.CreateGEP(
-				snapshotBuilder.getInt64Ty(), registerStateStoreBase,
-				{ snapshotBuilder.getInt64(reg) });
-			snapshotBuilder.CreateStore(snapshotBuilder.CreateLoad(
-				snapshotBuilder.getInt64Ty(), regs[reg]), slot);
+		auto *snapshotBlk =
+			BasicBlock::Create(*context, name, bpf_func);
+		IRBuilder<> snapshotBuilder(snapshotBlk);
+		emitRegisterSnapshot(snapshotBuilder, regsToStore);
+		snapshotBuilder.CreateBr(dst);
+		return snapshotBlk;
+	};
+	auto emitSnapshotCondJmp =
+		[&](uint16_t pc, const ebpf_inst &inst,
+		    std::function<Value *(Value *, Value *)> cmp) -> llvm::Expected<int> {
+		if (auto ret = localJmpDstAndNextBlk(pc, inst, instBlocks); ret) {
+			auto [dstBlk, nextBlk] = ret.get();
+			auto [src, dst, _] =
+				emitJmpLoadSrcAndDstAndZero(inst, &regs[0], builder);
+			builder.CreateCondBr(
+				cmp(dst, src),
+				buildSnapshotEdge(
+					dstBlk, "bb_jump_snapshot_taken_" +
+						 std::to_string(pc),
+					{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }),
+				buildSnapshotEdge(
+					nextBlk, "bb_jump_snapshot_fallthrough_" +
+						  std::to_string(pc),
+					{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }));
+			return 0;
+		} else {
+			return ret.takeError();
 		}
 	};
 	for (uint16_t pc = 0; pc < insts.size(); pc++) {
@@ -1218,9 +1261,10 @@ According to eBPF docs, it should actually be sign-extended to
 			if (auto dst =
 				    loadJmpDstBlock(pc, inst, instBlocks, true);
 			    dst) {
-				emitRegisterSnapshot(
-					builder, { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
-				builder.CreateBr(dst.get());
+				builder.CreateBr(buildSnapshotEdge(
+					dst.get(),
+					"bb_jump_snapshot_" + std::to_string(pc),
+					{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }));
 
 			} else {
 				return dst.takeError();
@@ -1232,9 +1276,10 @@ According to eBPF docs, it should actually be sign-extended to
 			if (auto dst = loadJmpDstBlock(pc, inst, instBlocks,
 						       false);
 			    dst) {
-				emitRegisterSnapshot(
-					builder, { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
-				builder.CreateBr(dst.get());
+				builder.CreateBr(buildSnapshotEdge(
+					dst.get(),
+					"bb_jump_snapshot_" + std::to_string(pc),
+					{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }));
 
 			} else {
 				return dst.takeError();
@@ -1315,7 +1360,6 @@ According to eBPF docs, it should actually be sign-extended to
 			break;
 		}
 		case EBPF_OP_EXIT: {
-			emitRegisterSnapshot(builder, { 0 });
 			builder.CreateCondBr(
 				builder.CreateICmpEQ(
 					builder.CreateLoad(builder.getInt64Ty(),
@@ -1335,10 +1379,8 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JEQ_IMM:
 		case EBPF_OP_JEQ32_REG:
 		case EBPF_OP_JEQ_REG: {
-			emitRegisterSnapshot(
-				builder, { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
-			HANDLE_ERR(emitCondJmpWithDstAndSrc(
-				builder, pc, inst, instBlocks, &regs[0],
+			HANDLE_ERR(emitSnapshotCondJmp(
+				pc, inst,
 				[&](auto dst, auto src) {
 					return builder.CreateICmpEQ(dst, src);
 				}));
@@ -1349,10 +1391,8 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JGT_IMM:
 		case EBPF_OP_JGT32_REG:
 		case EBPF_OP_JGT_REG: {
-			emitRegisterSnapshot(
-				builder, { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
-			HANDLE_ERR(emitCondJmpWithDstAndSrc(
-				builder, pc, inst, instBlocks, &regs[0],
+			HANDLE_ERR(emitSnapshotCondJmp(
+				pc, inst,
 				[&](auto dst, auto src) {
 					return builder.CreateICmpUGT(dst, src);
 				}));
@@ -1362,10 +1402,8 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JGE_IMM:
 		case EBPF_OP_JGE32_REG:
 		case EBPF_OP_JGE_REG: {
-			emitRegisterSnapshot(
-				builder, { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
-			HANDLE_ERR(emitCondJmpWithDstAndSrc(
-				builder, pc, inst, instBlocks, &regs[0],
+			HANDLE_ERR(emitSnapshotCondJmp(
+				pc, inst,
 				[&](auto dst, auto src) {
 					return builder.CreateICmpUGE(dst, src);
 				}));
@@ -1375,8 +1413,6 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JSET_IMM:
 		case EBPF_OP_JSET32_REG:
 		case EBPF_OP_JSET_REG: {
-			emitRegisterSnapshot(
-				builder, { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
 			if (auto ret =
 				    localJmpDstAndNextBlk(pc, inst, instBlocks);
 			    ret) {
@@ -1388,7 +1424,16 @@ According to eBPF docs, it should actually be sign-extended to
 					builder.CreateICmpNE(
 						builder.CreateAnd(dst, src),
 						zero),
-					dstBlk, nextBlk);
+					buildSnapshotEdge(
+						dstBlk,
+						"bb_jump_snapshot_taken_" +
+							std::to_string(pc),
+						{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }),
+					buildSnapshotEdge(
+						nextBlk,
+						"bb_jump_snapshot_fallthrough_" +
+							std::to_string(pc),
+						{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }));
 			} else {
 				return ret.takeError();
 			}
@@ -1399,10 +1444,8 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JNE_IMM:
 		case EBPF_OP_JNE32_REG:
 		case EBPF_OP_JNE_REG: {
-			emitRegisterSnapshot(
-				builder, { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
-			HANDLE_ERR(emitCondJmpWithDstAndSrc(
-				builder, pc, inst, instBlocks, &regs[0],
+			HANDLE_ERR(emitSnapshotCondJmp(
+				pc, inst,
 				[&](auto dst, auto src) {
 					return builder.CreateICmpNE(dst, src);
 				}));
@@ -1412,10 +1455,8 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JSGT_IMM:
 		case EBPF_OP_JSGT32_REG:
 		case EBPF_OP_JSGT_REG: {
-			emitRegisterSnapshot(
-				builder, { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
-			HANDLE_ERR(emitCondJmpWithDstAndSrc(
-				builder, pc, inst, instBlocks, &regs[0],
+			HANDLE_ERR(emitSnapshotCondJmp(
+				pc, inst,
 				[&](auto dst, auto src) {
 					return builder.CreateICmpSGT(dst, src);
 				}));
@@ -1425,10 +1466,8 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JSGE_IMM:
 		case EBPF_OP_JSGE32_REG:
 		case EBPF_OP_JSGE_REG: {
-			emitRegisterSnapshot(
-				builder, { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
-			HANDLE_ERR(emitCondJmpWithDstAndSrc(
-				builder, pc, inst, instBlocks, &regs[0],
+			HANDLE_ERR(emitSnapshotCondJmp(
+				pc, inst,
 				[&](auto dst, auto src) {
 					return builder.CreateICmpSGE(dst, src);
 				}));
@@ -1438,10 +1477,8 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JLT_IMM:
 		case EBPF_OP_JLT32_REG:
 		case EBPF_OP_JLT_REG: {
-			emitRegisterSnapshot(
-				builder, { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
-			HANDLE_ERR(emitCondJmpWithDstAndSrc(
-				builder, pc, inst, instBlocks, &regs[0],
+			HANDLE_ERR(emitSnapshotCondJmp(
+				pc, inst,
 				[&](auto dst, auto src) {
 					return builder.CreateICmpULT(dst, src);
 				}));
@@ -1451,10 +1488,8 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JLE_IMM:
 		case EBPF_OP_JLE32_REG:
 		case EBPF_OP_JLE_REG: {
-			emitRegisterSnapshot(
-				builder, { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
-			HANDLE_ERR(emitCondJmpWithDstAndSrc(
-				builder, pc, inst, instBlocks, &regs[0],
+			HANDLE_ERR(emitSnapshotCondJmp(
+				pc, inst,
 				[&](auto dst, auto src) {
 					return builder.CreateICmpULE(dst, src);
 				}));
@@ -1464,10 +1499,8 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JSLT_IMM:
 		case EBPF_OP_JSLT32_REG:
 		case EBPF_OP_JSLT_REG: {
-			emitRegisterSnapshot(
-				builder, { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
-			HANDLE_ERR(emitCondJmpWithDstAndSrc(
-				builder, pc, inst, instBlocks, &regs[0],
+			HANDLE_ERR(emitSnapshotCondJmp(
+				pc, inst,
 				[&](auto dst, auto src) {
 					return builder.CreateICmpSLT(dst, src);
 				}));
@@ -1477,10 +1510,8 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JSLE_IMM:
 		case EBPF_OP_JSLE32_REG:
 		case EBPF_OP_JSLE_REG: {
-			emitRegisterSnapshot(
-				builder, { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
-			HANDLE_ERR(emitCondJmpWithDstAndSrc(
-				builder, pc, inst, instBlocks, &regs[0],
+			HANDLE_ERR(emitSnapshotCondJmp(
+				pc, inst,
 				[&](auto dst, auto src) {
 					return builder.CreateICmpSLE(dst, src);
 				}));

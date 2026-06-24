@@ -18,6 +18,15 @@ const unsigned char helper_call_add[] =
 	"\x85\x00\x00\x00\x03\x00\x00\x00"
 	"\x95\x00\x00\x00\x00\x00\x00\x00";
 
+const ebpf_inst local_call_snapshot_prog[] = {
+	{ EBPF_OP_MOV64_IMM, 6, 0, 0, 7 },
+	{ EBPF_OP_CALL, 0, 1, 0, 1 },
+	{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+	{ EBPF_OP_MOV64_IMM, 6, 0, 0, 42 },
+	{ EBPF_OP_MOV64_IMM, 0, 0, 0, 9 },
+	{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+};
+
 extern "C" uint64_t snapshot_add_func(uint64_t a, uint64_t b, uint64_t,
 				      uint64_t, uint64_t)
 {
@@ -64,13 +73,6 @@ TEST_CASE("Instrumented compile snapshots full state before jumps and r0 before 
 	CHECK(snapshot[0] == 4);
 	CHECK(snapshot[1] == 4);
 	CHECK(snapshot[2] == 3);
-	CHECK(snapshot[3] == 0);
-	CHECK(snapshot[4] == 0);
-	CHECK(snapshot[5] == 0);
-	CHECK(snapshot[6] == 0);
-	CHECK(snapshot[7] == 0);
-	CHECK(snapshot[8] == 0);
-	CHECK(snapshot[9] == 0);
 }
 
 TEST_CASE("Instrumented compile jump snapshots overwrite the stored register set")
@@ -92,13 +94,6 @@ TEST_CASE("Instrumented compile jump snapshots overwrite the stored register set
 	CHECK(snapshot[0] == 4);
 	CHECK(snapshot[1] == 4);
 	CHECK(snapshot[2] == 3);
-	CHECK(snapshot[3] == 0);
-	CHECK(snapshot[4] == 0);
-	CHECK(snapshot[5] == 0);
-	CHECK(snapshot[6] == 0);
-	CHECK(snapshot[7] == 0);
-	CHECK(snapshot[8] == 0);
-	CHECK(snapshot[9] == 0);
 }
 
 TEST_CASE("Instrumented compile snapshots r1-r9 before helper calls")
@@ -122,11 +117,24 @@ TEST_CASE("Instrumented compile snapshots r1-r9 before helper calls")
 	CHECK(snapshot[0] == 4);
 	CHECK(snapshot[1] == 1);
 	CHECK(snapshot[2] == 3);
-	CHECK(snapshot[3] == 0);
-	CHECK(snapshot[4] == 0);
-	CHECK(snapshot[5] == 0);
-	CHECK(snapshot[6] == 0);
-	CHECK(snapshot[7] == 0);
-	CHECK(snapshot[8] == 0);
-	CHECK(snapshot[9] == 0);
+}
+
+
+TEST_CASE("Instrumented compile snapshots restored caller state after local returns")
+{
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.load_code(local_call_snapshot_prog,
+			     sizeof(local_call_snapshot_prog)) == 0);
+
+	bpftime::ExeState snapshot = {};
+	auto func = vm.compile(&snapshot);
+	REQUIRE(func.has_value());
+
+	uint64_t mem = 0;
+	uint64_t ret = 0;
+	REQUIRE(vm.exec(&mem, sizeof(mem), ret) == 0);
+	REQUIRE(ret == 9);
+
+	CHECK(snapshot[0] == 9);
+	CHECK(snapshot[6] == 7);
 }

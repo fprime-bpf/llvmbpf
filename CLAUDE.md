@@ -166,6 +166,7 @@ llvmbpf is designed as a component of the larger bpftime project. For loading eB
 - `example/ptx/`: CUDA PTX generation examples (NVIDIA GPUs)
 - `example/spirv/`: SPIR-V generation examples (OpenCL, cross-vendor GPUs)
 
-## Branches and Tags
-- "support-snapshot:v1": Baseline snapshot implementation. Stores all r0-r9 after every instructions that can alter register values.
-- "support-snapshot:v2": Improving upon "v1" by only storing the modified register.
+## Tags
+- "v1": Baseline snapshot implementation. Stores all r0-r9 after every instructions that can alter register values.
+- "v2": Improving upon "v1" by only storing the modified register.
+- "v3": Full snapshot before every non-FPU jump instructions. r1-r9 before every call. r0 before every return.
