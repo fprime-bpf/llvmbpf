@@ -7,6 +7,7 @@
 #include <ebpf_inst.h>
 #include <string>
 #include <cstdint>
+#include <cstddef>
 
 #ifndef MAX_EXT_FUNCS
 #define MAX_EXT_FUNCS 8192
@@ -19,7 +20,19 @@ struct external_function {
 	std::string name;
 	void *fn;
 };
-using ExeState=uint64_t[10];//stores R0-R9 ebpf registers.
+struct ExeState{
+	uint64_t ebpfRegs[10];//stores R0-R9 ebpf registers.
+	float fpuRegs[11];//stores additional FPU registers supported.
+
+	uint64_t &operator[](std::size_t index) noexcept
+	{
+		return ebpfRegs[index];
+	}
+	const uint64_t &operator[](std::size_t index) const noexcept
+	{
+		return ebpfRegs[index];
+	}
+};
 
 class llvm_bpf_jit_context;
 
