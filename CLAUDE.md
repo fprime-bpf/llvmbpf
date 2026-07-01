@@ -168,6 +168,4 @@ llvmbpf is designed as a component of the larger bpftime project. For loading eB
 
 ## Tags
 - "v1": Stores the changed register after every modifing-instructions, including FPU registers.
-- "v2": Unused.
-- "v3": Full snapshot before every non-FPU jump instructions. r1-r9 before every call. r0 before every return.
-- "v3.1": Like "v3", but after those instructions.
+- "v2": After `call`: stores r1-r5. After `exit`: stores r0. After non-conditional jumps: stores r0-r9, f0-f10. After regular eBPF conditional jumps: stores r0-r9. After FPU conditional jumps: stores f0-f10.
