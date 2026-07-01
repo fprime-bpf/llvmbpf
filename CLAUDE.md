@@ -167,6 +167,7 @@ llvmbpf is designed as a component of the larger bpftime project. For loading eB
 - `example/spirv/`: SPIR-V generation examples (OpenCL, cross-vendor GPUs)
 
 ## Tags
-- "v1": Baseline snapshot implementation. Stores all r0-r9 after every instructions that can alter register values.
-- "v2": Improving upon "v1" by only storing the modified register.
+- "v1": Stores the changed register after every modifing-instructions, including FPU registers.
+- "v2": Unused.
 - "v3": Full snapshot before every non-FPU jump instructions. r1-r9 before every call. r0 before every return.
+- "v3.1": Like "v3", but after those instructions.
