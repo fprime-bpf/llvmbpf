@@ -14,13 +14,44 @@ const unsigned char simple_cond_1[] =
 	"\x00\x00\x00\x63\x1a\xfc\xff\x00\x00\x00\x00\x05\x00\x00\x00\x00\x00\x00\x00\x61\xa0\xfc\xff\x00\x00"
 	"\x00\x00\x95\x00\x00\x00\x00\x00\x00\x00";
 
-const ebpf_inst fpu_modifying[] = {
-	{ DUO_OP_FST, 2, 0, 0, 0x3fc00000 },
-	{ DUO_OP_FADD_IMM, 2, 0, 2, 0x40000000 },
+const unsigned char helper_call_add[] =
+	"\xb7\x01\x00\x00\x01\x00\x00\x00"
+	"\xb7\x02\x00\x00\x03\x00\x00\x00"
+	"\x85\x00\x00\x00\x03\x00\x00\x00"
+	"\x95\x00\x00\x00\x00\x00\x00\x00";
+
+const ebpf_inst local_call_snapshot_prog[] = {
+	{ EBPF_OP_MOV64_IMM, 6, 0, 0, 7 },
+	{ EBPF_OP_CALL, 0, 1, 0, 1 },
+	{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+	{ EBPF_OP_MOV64_IMM, 6, 0, 0, 42 },
+	{ EBPF_OP_MOV64_IMM, 0, 0, 0, 9 },
+	{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+};
+
+const ebpf_inst fpu_uncond_snapshot_prog[] = {
+	{ DUO_OP_FST, 0, 0, 0, 0x3fc00000 },
 	{ DUO_OP_FST, 10, 0, 0, static_cast<int32_t>(0xc0600000u) },
+	{ EBPF_OP_JA, 0, 0, 1, 0 },
+	{ DUO_OP_FST, 0, 0, 0, 0x41100000 },
 	{ EBPF_OP_MOV64_IMM, 0, 0, 0, 0 },
 	{ EBPF_OP_EXIT, 0, 0, 0, 0 },
 };
+
+const ebpf_inst fpu_cond_snapshot_prog[] = {
+	{ DUO_OP_FST, 0, 0, 0, 0x3fc00000 },
+	{ DUO_OP_FST, 1, 0, 0, 0x40200000 },
+	{ DUO_OP_FJEQ_IMM, 0, 0xf, 1, 0x3fc00000 },
+	{ DUO_OP_FST, 1, 0, 0, 0x41100000 },
+	{ EBPF_OP_MOV64_IMM, 0, 0, 0, 0 },
+	{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+};
+
+extern "C" uint64_t snapshot_add_func(uint64_t a, uint64_t b, uint64_t,
+				      uint64_t, uint64_t)
+{
+	return a + b;
+}
 }
 /*
 mov64 r1, 1
@@ -44,7 +75,7 @@ ja +0
 ldxw r0, [r10 - 4]
 exit
 */
-TEST_CASE("Instrumented compile stores final register snapshot")
+TEST_CASE("Instrumented compile snapshots full state before jumps and r0 before exit")
 {
 	bpftime::llvmbpf_vm vm;
 	REQUIRE(vm.load_code((const void *)simple_cond_1,
@@ -62,16 +93,9 @@ TEST_CASE("Instrumented compile stores final register snapshot")
 	CHECK(snapshot[0] == 4);
 	CHECK(snapshot[1] == 4);
 	CHECK(snapshot[2] == 3);
-	CHECK(snapshot[3] == 0);
-	CHECK(snapshot[4] == 0);
-	CHECK(snapshot[5] == 0);
-	CHECK(snapshot[6] == 0);
-	CHECK(snapshot[7] == 0);
-	CHECK(snapshot[8] == 0);
-	CHECK(snapshot[9] == 0);
 }
 
-TEST_CASE("Instrumented compile only updates changed registers")
+TEST_CASE("Instrumented compile jump snapshots overwrite the stored register set")
 {
 	bpftime::llvmbpf_vm vm;
 	REQUIRE(vm.load_code((const void *)simple_cond_1,
@@ -90,26 +114,60 @@ TEST_CASE("Instrumented compile only updates changed registers")
 	CHECK(snapshot[0] == 4);
 	CHECK(snapshot[1] == 4);
 	CHECK(snapshot[2] == 3);
-	CHECK(snapshot[3] == 0x103);
-	CHECK(snapshot[4] == 0x104);
-	CHECK(snapshot[5] == 0x105);
-	CHECK(snapshot[6] == 0x106);
-	CHECK(snapshot[7] == 0x107);
-	CHECK(snapshot[8] == 0x108);
-	CHECK(snapshot[9] == 0x109);
+}
+
+TEST_CASE("Instrumented compile snapshots r1-r9 before helper calls")
+{
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.register_external_function(3, "add",
+				      (void *)snapshot_add_func) == 0);
+	REQUIRE(vm.load_code((const void *)helper_call_add,
+			     sizeof(helper_call_add) - 1) == 0);
+
+	bpftime::ExeState snapshot = { 0x100, 0x101, 0x102, 0x103, 0x104,
+				       0x105, 0x106, 0x107, 0x108, 0x109 };
+	auto func = vm.compile(&snapshot);
+	REQUIRE(func.has_value());
+
+	uint64_t mem = 0;
+	uint64_t ret = 0;
+	REQUIRE(vm.exec(&mem, sizeof(mem), ret) == 0);
+	REQUIRE(ret == 4);
+
+	CHECK(snapshot[0] == 4);
+	CHECK(snapshot[1] == 1);
+	CHECK(snapshot[2] == 3);
 }
 
 
-TEST_CASE("Instrumented compile only updates changed FPU registers")
+TEST_CASE("Instrumented compile snapshots restored caller state after local returns")
 {
 	bpftime::llvmbpf_vm vm;
-	REQUIRE(vm.load_code((const void *)fpu_modifying,
-				     sizeof(fpu_modifying)) == 0);
+	REQUIRE(vm.load_code(local_call_snapshot_prog,
+			     sizeof(local_call_snapshot_prog)) == 0);
 
 	bpftime::ExeState snapshot = {};
-	for (int i = 0; i < 11; i++) {
-		snapshot.fpuRegs[i] = 100.0F + static_cast<float>(i);
-	}
+	auto func = vm.compile(&snapshot);
+	REQUIRE(func.has_value());
+
+	uint64_t mem = 0;
+	uint64_t ret = 0;
+	REQUIRE(vm.exec(&mem, sizeof(mem), ret) == 0);
+	REQUIRE(ret == 9);
+
+	CHECK(snapshot[0] == 9);
+	CHECK(snapshot[6] == 7);
+}
+
+TEST_CASE("Instrumented compile snapshots FPU registers after unconditional jumps")
+{
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.load_code(fpu_uncond_snapshot_prog,
+			     sizeof(fpu_uncond_snapshot_prog)) == 0);
+
+	bpftime::ExeState snapshot = {};
+	snapshot.fpuRegs[0] = 100.0F;
+	snapshot.fpuRegs[10] = 110.0F;
 	auto func = vm.compile(&snapshot);
 	REQUIRE(func.has_value());
 
@@ -118,10 +176,30 @@ TEST_CASE("Instrumented compile only updates changed FPU registers")
 	REQUIRE(vm.exec(&mem, sizeof(mem), ret) == 0);
 	REQUIRE(ret == 0);
 
-	CHECK(snapshot.fpuRegs[0] == 100.0F);
-	CHECK(snapshot.fpuRegs[1] == 101.0F);
-	CHECK(snapshot.fpuRegs[2] == 3.5F);
-	CHECK(snapshot.fpuRegs[3] == 103.0F);
-	CHECK(snapshot.fpuRegs[9] == 109.0F);
+	CHECK(snapshot.fpuRegs[0] == 1.5F);
 	CHECK(snapshot.fpuRegs[10] == -3.5F);
 }
+
+TEST_CASE("Instrumented compile snapshots FPU registers after FPU conditional jumps")
+{
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.load_code(fpu_cond_snapshot_prog,
+			     sizeof(fpu_cond_snapshot_prog)) == 0);
+
+	bpftime::ExeState snapshot = {};
+	snapshot[1] = 0x101;
+	snapshot.fpuRegs[0] = 100.0F;
+	snapshot.fpuRegs[1] = 101.0F;
+	auto func = vm.compile(&snapshot);
+	REQUIRE(func.has_value());
+
+	uint64_t mem = 0;
+	uint64_t ret = 1;
+	REQUIRE(vm.exec(&mem, sizeof(mem), ret) == 0);
+	REQUIRE(ret == 0);
+
+	CHECK(snapshot[1] == 0x101);
+	CHECK(snapshot.fpuRegs[0] == 1.5F);
+	CHECK(snapshot.fpuRegs[1] == 2.5F);
+}
+
