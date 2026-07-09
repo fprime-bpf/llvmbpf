@@ -12,6 +12,7 @@ endif()
 
 set(TEST_SOURCES
     bpf_prog_test.cpp
+    pdg_test.cpp
     vm_test.cpp
 )
 

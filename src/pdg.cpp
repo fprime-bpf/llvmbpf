@@ -8,6 +8,7 @@
 #include <deque>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <set>
 
 namespace
@@ -153,6 +154,7 @@ struct State {
 	std::array<Slot, 11> fregs;
 	std::array<Slot, MAX_BPF_STACK> stack;
 	std::vector<PDEdge> mapWriters;
+	std::vector<uint16_t> callStack;
 
 	State()
 	{
@@ -169,8 +171,28 @@ class Builder {
 
 	PDGraph run()
 	{
-		for (std::size_t i = 0; i < instructions_.size(); ++i)
-			process(static_cast<uint16_t>(i));
+		if (instructions_.empty())
+			return graph_;
+
+		std::vector<std::vector<State> > incoming(instructions_.size());
+		std::deque<std::pair<uint16_t, State> > worklist;
+		incoming[0].push_back(State());
+		worklist.push_back({ 0, incoming[0].front() });
+
+		while (!worklist.empty()) {
+			const auto [pc, state] = worklist.front();
+			worklist.pop_front();
+
+			state_ = state;
+			process(pc);
+
+			for (auto [next, outgoing] : successorStates(pc)) {
+				if (next >= instructions_.size())
+					continue;
+				enqueueState(incoming[next], worklist, next,
+					     std::move(outgoing));
+			}
+		}
 		return graph_;
 	}
 
@@ -179,17 +201,331 @@ class Builder {
 	PDGraph graph_;
 	State state_;
 
+	static bool sameEdgeBase(const PDEdge &lhs, const PDEdge &rhs)
+	{
+		return lhs.dst == rhs.dst &&
+		       (static_cast<uint8_t>(lhs.type) & 0x03) ==
+			       (static_cast<uint8_t>(rhs.type) & 0x03);
+	}
+
+	static bool sameIntValue(const IntValue &lhs, const IntValue &rhs)
+	{
+		const auto &left = lhs.ranges();
+		const auto &right = rhs.ranges();
+		if (left.size() != right.size())
+			return false;
+		for (std::size_t i = 0; i < left.size(); ++i) {
+			if (left[i].lo != right[i].lo || left[i].hi != right[i].hi)
+				return false;
+		}
+		return true;
+	}
+
+	static bool sameStackPtrValue(const StackPtrValue &lhs,
+				      const StackPtrValue &rhs)
+	{
+		return lhs.offsets() == rhs.offsets();
+	}
+
+	static bool sameValue(const PDValue &lhs, const PDValue &rhs)
+	{
+		if (lhs.index() != rhs.index())
+			return false;
+		if (const auto *l = std::get_if<IntValue>(&lhs))
+			return sameIntValue(*l, std::get<IntValue>(rhs));
+		if (const auto *l = std::get_if<StackPtrValue>(&lhs))
+			return sameStackPtrValue(*l, std::get<StackPtrValue>(rhs));
+		if (const auto *l = std::get_if<MapPtrValue>(&lhs))
+			return l->id == std::get<MapPtrValue>(rhs).id;
+		return true;
+	}
+
+	static bool mergeWriters(std::vector<PDEdge> &dst,
+				 const std::vector<PDEdge> &src)
+	{
+		bool changed = false;
+		for (const auto &writer : src) {
+			auto found = std::find_if(dst.begin(), dst.end(),
+						 [&](const PDEdge &edge) {
+							 return sameEdgeBase(edge, writer);
+						 });
+			if (found == dst.end()) {
+				dst.push_back(writer);
+				changed = true;
+			} else {
+				const Dep oldType = found->type;
+				found->type |= writer.type;
+				changed = changed || found->type != oldType;
+			}
+		}
+		return changed;
+	}
+
+	static bool mergeSlot(Slot &dst, const Slot &src)
+	{
+		bool changed = mergeWriters(dst.writers, src.writers);
+		if (!sameValue(dst.value, src.value)) {
+			if (!std::holds_alternative<std::monostate>(dst.value)) {
+				dst.value = {};
+				changed = true;
+			}
+		}
+		return changed;
+	}
+
+	static bool sameCallStack(const State &lhs, const State &rhs)
+	{
+		return lhs.callStack == rhs.callStack;
+	}
+
+	static bool mergeState(State &dst, const State &src)
+	{
+		if (!sameCallStack(dst, src))
+			return false;
+
+		bool changed = false;
+		for (std::size_t i = 0; i < dst.regs.size(); ++i)
+			changed = mergeSlot(dst.regs[i], src.regs[i]) || changed;
+		for (std::size_t i = 0; i < dst.fregs.size(); ++i)
+			changed = mergeSlot(dst.fregs[i], src.fregs[i]) || changed;
+		for (std::size_t i = 0; i < dst.stack.size(); ++i)
+			changed = mergeSlot(dst.stack[i], src.stack[i]) || changed;
+		changed = mergeWriters(dst.mapWriters, src.mapWriters) || changed;
+		return changed;
+	}
+
+	static void enqueueState(std::vector<State> &incoming,
+				 std::deque<std::pair<uint16_t, State> > &worklist,
+				 uint16_t pc, State state)
+	{
+		for (auto &existing : incoming) {
+			if (sameCallStack(existing, state)) {
+				if (mergeState(existing, state))
+					worklist.push_back({ pc, existing });
+				return;
+			}
+		}
+
+		incoming.push_back(std::move(state));
+		worklist.push_back({ pc, incoming.back() });
+	}
+
+	std::optional<IntValue> intersectValue(const IntValue &value,
+					       uint64_t lo, uint64_t hi) const
+	{
+		std::vector<IntInterval> ranges;
+		for (const auto &range : value.ranges()) {
+			const uint64_t nextLo = std::max(range.lo, lo);
+			const uint64_t nextHi = std::min(range.hi, hi);
+			if (nextLo <= nextHi)
+				ranges.push_back({ nextLo, nextHi });
+		}
+		if (ranges.empty())
+			return std::nullopt;
+		return IntValue(std::move(ranges));
+	}
+
+	std::optional<IntValue> excludeValue(const IntValue &value,
+					     uint64_t excluded) const
+	{
+		std::vector<IntInterval> ranges;
+		for (const auto &range : value.ranges()) {
+			if (excluded < range.lo || excluded > range.hi) {
+				ranges.push_back(range);
+				continue;
+			}
+			if (range.lo < excluded)
+				ranges.push_back({ range.lo, excluded - 1 });
+			if (excluded < range.hi)
+				ranges.push_back({ excluded + 1, range.hi });
+		}
+		if (ranges.empty())
+			return std::nullopt;
+		return IntValue(std::move(ranges));
+	}
+
+	bool refineAgainstConstant(State &state, uint8_t reg, uint8_t op,
+				   uint64_t constant, bool taken) const
+	{
+		auto *value = std::get_if<IntValue>(&state.regs[reg].value);
+		if (value == nullptr)
+			return true;
+
+		std::optional<IntValue> refined;
+		switch (op) {
+		case EBPF_MODE_JEQ:
+			refined = taken ? intersectValue(*value, constant, constant) :
+					  excludeValue(*value, constant);
+			break;
+		case EBPF_MODE_JNE:
+			refined = taken ? excludeValue(*value, constant) :
+					  intersectValue(*value, constant, constant);
+			break;
+		case EBPF_MODE_JGT:
+			refined = taken ?
+					  (constant == U64Max ?
+						   std::optional<IntValue>{} :
+						   intersectValue(*value, constant + 1,
+								  U64Max)) :
+					  intersectValue(*value, 0, constant);
+			break;
+		case EBPF_MODE_JGE:
+			refined = taken ? intersectValue(*value, constant, U64Max) :
+					  (constant == 0 ?
+						   std::optional<IntValue>{} :
+						   intersectValue(*value, 0,
+								  constant - 1));
+			break;
+		case EBPF_MODE_JLT:
+			refined = taken ?
+					  (constant == 0 ?
+						   std::optional<IntValue>{} :
+						   intersectValue(*value, 0,
+								  constant - 1)) :
+					  intersectValue(*value, constant, U64Max);
+			break;
+		case EBPF_MODE_JLE:
+			refined = taken ? intersectValue(*value, 0, constant) :
+					  (constant == U64Max ?
+						   std::optional<IntValue>{} :
+						   intersectValue(*value, constant + 1,
+								  U64Max));
+			break;
+		default:
+			return true;
+		}
+
+		if (!refined)
+			return false;
+		state.regs[reg].value = *refined;
+		return true;
+	}
+
+	bool refineConditionalState(State &state, const ebpf_inst &inst,
+				    bool taken) const
+	{
+		const auto op = inst.opcode & EBPF_JMP_OP_MASK;
+		if (op == EBPF_MODE_JSET || op == EBPF_MODE_JSGT ||
+		    op == EBPF_MODE_JSGE || op == EBPF_MODE_JSLT ||
+		    op == EBPF_MODE_JSLE)
+			return true;
+
+		if (!isRegSource(inst))
+			return refineAgainstConstant(
+				state, inst.dst, op,
+				static_cast<uint64_t>(static_cast<int64_t>(inst.imm)),
+				taken);
+
+		const auto *srcValue = std::get_if<IntValue>(&state.regs[inst.src].value);
+		if (srcValue != nullptr) {
+			if (auto exact = srcValue->exactValue()) {
+				if (!refineAgainstConstant(state, inst.dst, op,
+							   *exact, taken))
+					return false;
+			}
+		}
+
+		const auto *dstValue = std::get_if<IntValue>(&state.regs[inst.dst].value);
+		if (dstValue == nullptr)
+			return true;
+		const auto exactDst = dstValue->exactValue();
+		if (!exactDst)
+			return true;
+
+		uint8_t reversed = op;
+		switch (op) {
+		case EBPF_MODE_JGT:
+			reversed = EBPF_MODE_JLT;
+			break;
+		case EBPF_MODE_JGE:
+			reversed = EBPF_MODE_JLE;
+			break;
+		case EBPF_MODE_JLT:
+			reversed = EBPF_MODE_JGT;
+			break;
+		case EBPF_MODE_JLE:
+			reversed = EBPF_MODE_JGE;
+			break;
+		default:
+			break;
+		}
+		return refineAgainstConstant(state, inst.src, reversed, *exactDst,
+					     taken);
+	}
+
+	std::vector<std::pair<uint16_t, State> > successorStates(uint16_t pc) const
+	{
+		const auto &inst = instructions_[pc];
+		auto addNext = [&](int64_t value,
+				   std::vector<std::pair<uint16_t, State> > &out,
+				   State state) {
+			if (value >= 0 && static_cast<std::size_t>(value) < instructions_.size())
+				out.push_back({ static_cast<uint16_t>(value),
+						std::move(state) });
+		};
+
+		std::vector<std::pair<uint16_t, State> > result;
+		if (inst.opcode == EBPF_OP_EXIT) {
+			if (state_.callStack.empty())
+				return result;
+			State returned = state_;
+			const uint16_t target = returned.callStack.back();
+			returned.callStack.pop_back();
+			returned.regs[0].writers = { { pc, Dep::Int } };
+			addNext(target, result, std::move(returned));
+			return result;
+		}
+		if (inst.opcode == EBPF_OP_LDDW) {
+			addNext(static_cast<int64_t>(pc) + 2, result, state_);
+			return result;
+		}
+		if (inst.opcode == EBPF_OP_JA) {
+			addNext(static_cast<int64_t>(pc) + 1 + inst.offset, result,
+				state_);
+			return result;
+		}
+		if (inst.opcode == EBPF_OP_JA_IMM) {
+			addNext(static_cast<int64_t>(pc) + 1 + inst.imm, result,
+				state_);
+			return result;
+		}
+		if ((inst.opcode == EBPF_OP_CALL ||
+		     inst.opcode == (EBPF_OP_CALL | 0x8)) &&
+		    inst.src == 0x1) {
+			State called = state_;
+			called.callStack.push_back(pc + 1);
+			addNext(static_cast<int64_t>(pc) + 1 + inst.imm, result,
+				std::move(called));
+			return result;
+		}
+		if (isCondJump(inst) || (duo_is_fpu(inst) && duo_class(inst) == FJMP)) {
+			State fallthrough = state_;
+			State taken = state_;
+			const bool refine = isCondJump(inst);
+			if (!refine || refineConditionalState(fallthrough, inst, false))
+				addNext(static_cast<int64_t>(pc) + 1, result,
+					std::move(fallthrough));
+			if (!refine || refineConditionalState(taken, inst, true))
+				addNext(static_cast<int64_t>(pc) + 1 + inst.offset,
+					result, std::move(taken));
+			return result;
+		}
+
+		addNext(static_cast<int64_t>(pc) + 1, result, state_);
+		return result;
+	}
+
 	void addEdge(uint16_t src, uint16_t dst, Dep type)
 	{
 		if (src >= graph_.size() || src == dst)
 			return;
 
 		auto &edges = graph_[src];
-		auto found = std::find_if(edges.begin(), edges.end(), [&](const PDEdge &edge) {
-			return edge.dst == dst &&
-			       (static_cast<uint8_t>(edge.type) & 0x03) ==
-				       (static_cast<uint8_t>(type) & 0x03);
-		});
+		PDEdge key{ dst, type };
+		auto found = std::find_if(edges.begin(), edges.end(),
+					  [&](const PDEdge &edge) {
+						  return sameEdgeBase(edge, key);
+					  });
 		if (found == edges.end()) {
 			edges.push_back({ dst, type });
 		} else {
@@ -452,12 +788,8 @@ class Builder {
 
 	void handleCall(uint16_t pc, const ebpf_inst &inst)
 	{
-		if (inst.src == 0x1) {
-			for (int reg = 1; reg <= 5; ++reg)
-				readSlot(state_.regs[reg], pc, Dep::Int | Dep::Potential);
-			unknownWrite(state_.regs[0], pc, Dep::Int);
+		if (inst.src == 0x1)
 			return;
-		}
 
 		switch (inst.imm) {
 		case 1: // bpf_map_lookup_elem
