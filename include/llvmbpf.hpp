@@ -86,11 +86,15 @@ class llvmbpf_vm {
 	std::optional<precompiled_ebpf_function> compile() noexcept;
 
 	/*
-	The JITed function will be additionally instrumented such that it store values of R0-R9 register after every eBPF instructions that may change them. For example, BPF_ST, BPF_STX, and BPF_ALU* instructions.
+	The JITed function will be additionally instrumented to store values of modified registers into `store` after eBPF instructions specified by `instsIdxs`.
 	
+	For example, suppose `instructions[instsIdxs[0]]` is a BPF_ADD with src=r0 and dst=r1. Then, after this eBPF instruction, we'll emit the necessary LLVM IR to store r1 into `store`.
+
 	The compiled function must have write access the provided memory reigon when it's ran. Assume the compiled function will be the only one using it (no race condition with external threads).
+
+	Assume `instsIdxs` contains valid indexes. `instsIdxs` are produced by `partitionPDG`.
 	*/
-	std::optional<precompiled_ebpf_function> compile(const ExeState* store)noexcept;
+	std::optional<precompiled_ebpf_function> compile(const std::vector<uint16_t> &instsIdxs,const ExeState* store);
 
 	// See the spec for details.
 	// If the code involve array map access, the map_val function
@@ -107,6 +111,8 @@ class llvmbpf_vm {
 	std::optional<std::vector<uint8_t>>
 	generate_spirv(const char *target_env = "");
 
+	std::vector<ebpf_inst> instructions;//this will be used when calling `buildPDG`.
+
     private:
 	// See spec for details
 	uint64_t (*map_by_fd)(uint32_t) = nullptr;
@@ -115,7 +121,7 @@ class llvmbpf_vm {
 	uint64_t (*var_addr)(uint32_t) = nullptr;
 	uint64_t (*code_addr)(uint32_t) = nullptr;
 
-	std::vector<ebpf_inst> instructions;
+	
 
 	std::vector<std::optional<external_function> > ext_funcs;
 

@@ -12,7 +12,6 @@ endif()
 
 set(TEST_SOURCES
     bpf_prog_test.cpp
-    trace_test.cpp
     vm_test.cpp
 )
 

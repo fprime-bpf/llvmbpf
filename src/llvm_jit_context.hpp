@@ -41,8 +41,7 @@ class llvm_bpf_jit_context {
 		       bool patch_map_val_at_compile_time,
 		       bool main_func_with_arguments = true,
 		       const std::string &func_name = "bpf_main",
-		       bool is_gpu = false,
-		       uintptr_t register_state_store_addr = 0);
+		       bool is_gpu = false);
 	std::vector<uint8_t>
 	do_aot_compile(const std::vector<std::string> &extFuncNames,
 		       const std::vector<std::string> &lddwHelpers,
@@ -55,7 +54,6 @@ class llvm_bpf_jit_context {
     public:
 	std::optional<std::unique_ptr<llvm::orc::LLJIT>> jit;
 	llvm::Error do_jit_compile();
-	llvm::Error do_jit_compile(uintptr_t);
 	llvm_bpf_jit_context(llvmbpf_vm &vm);
 	virtual ~llvm_bpf_jit_context();
 	precompiled_ebpf_function get_entry_address();

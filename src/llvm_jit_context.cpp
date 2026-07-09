@@ -65,11 +65,7 @@
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Object/ModuleSymbolTable.h"
 #include "llvm/Passes/PassBuilder.h"
-#if LLVM_VERSION_MAJOR >= 22
-#include "llvm/Plugins/PassPlugin.h"//new path in 22
-#else
 #include "llvm/Passes/PassPlugin.h"
-#endif
 #include "llvm/Passes/StandardInstrumentations.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
@@ -279,41 +275,21 @@ llvm::Error llvm_bpf_jit_context::do_jit_compile()
 			"jit initialization failed",
 			llvm::inconvertibleErrorCode());
 	}
+	// Handle the error from generateModule
 	auto bpfModuleOrErr =
 		generateModule(extFuncNames, definedLddwHelpers, true);
 	if (!bpfModuleOrErr) {
 		return bpfModuleOrErr.takeError();
 	}
+	// If successful, get the module
 	auto bpfModule = std::move(*bpfModuleOrErr);
+	// Optimize the module
 	bpfModule.withModuleDo([](auto &M) { optimizeModule(M); });
+	// Handle the error from addIRModule
 	if (auto err = jit->addIRModule(std::move(bpfModule))) {
 		return err;
 	}
-	this->jit = std::move(jit);
-	return llvm::Error::success();
-}
-
-llvm::Error llvm_bpf_jit_context::do_jit_compile(uintptr_t register_state_store_addr)
-{
-	spin_lock_guard guard(compiling.get());
-	auto [jit, extFuncNames, definedLddwHelpers] =
-		create_and_initialize_lljit_instance();
-	if (!jit) {
-		return llvm::make_error<llvm::StringError>(
-			"jit initialization failed",
-			llvm::inconvertibleErrorCode());
-	}
-	auto bpfModuleOrErr = generateModule(
-		extFuncNames, definedLddwHelpers, true, true, "bpf_main", false,
-		register_state_store_addr);
-	if (!bpfModuleOrErr) {
-		return bpfModuleOrErr.takeError();
-	}
-	auto bpfModule = std::move(*bpfModuleOrErr);
-	bpfModule.withModuleDo([](auto &M) { optimizeModule(M); });
-	if (auto err = jit->addIRModule(std::move(bpfModule))) {
-		return err;
-	}
+	// If everything succeeds, move the JIT instance
 	this->jit = std::move(jit);
 	return llvm::Error::success();
 }
@@ -337,13 +313,7 @@ std::vector<uint8_t> llvm_bpf_jit_context::do_aot_compile(
 				module.print(llvm::outs(), nullptr);
 			}
 			optimizeModule(module);
-			module.setTargetTriple(
-#if LLVM_VERSION_MAJOR>=22			
-				llvm::Triple(defaultTargetTriple)
-#else
-defaultTargetTriple
-#endif
-			);
+			module.setTargetTriple(defaultTargetTriple);
 			std::string error;
 			auto target = TargetRegistry::lookupTarget(
 				defaultTargetTriple, error);
@@ -355,12 +325,8 @@ defaultTargetTriple
 					"Unable to get local target");
 			}
 			auto targetMachine = target->createTargetMachine(
-#if LLVM_VERSION_MAJOR>=22
-				llvm::Triple(defaultTargetTriple)
-#else
-defaultTargetTriple
-#endif
-				, "generic", "", TargetOptions(), Reloc::PIC_);
+				defaultTargetTriple, "generic", "",
+				TargetOptions(), Reloc::PIC_);
 			if (!targetMachine) {
 				SPDLOG_ERROR("Unable to create target machine");
 				throw std::runtime_error(
@@ -677,13 +643,8 @@ createNVPTXTargetMachine(const char *target_cpu)
 	llvm::TargetOptions options;
 	options.FloatABIType = llvm::FloatABI::Default;
 	auto result = std::unique_ptr<llvm::TargetMachine>(
-		target->createTargetMachine(
-#if LLVM_VERSION_MAJOR>=22			
-			triple
-#else
-		triple.str()
-#endif					
-			, target_cpu, "", options, llvm::Reloc::Static));
+		target->createTargetMachine(triple.str(), target_cpu, "",
+					    options, llvm::Reloc::Static));
 	return result;
 }
 std::optional<std::string>
@@ -773,12 +734,8 @@ createSPIRVTargetMachine(const char *target_cpu)
 	llvm::TargetOptions options;
 	options.FloatABIType = llvm::FloatABI::Default;
 	auto result = std::unique_ptr<llvm::TargetMachine>(
-		target->createTargetMachine(triple
-#if LLVM_VERSION_MAJOR<22			
-			.str()
-#endif
-
-			, target_cpu, "",options, llvm::Reloc::Static));
+		target->createTargetMachine(triple.str(), target_cpu, "",
+					    options, llvm::Reloc::Static));
 	return result;
 }
 
