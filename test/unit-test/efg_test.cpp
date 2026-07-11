@@ -11,19 +11,19 @@ ebpf_inst makeInst(uint8_t opcode, uint8_t dst = 0, uint8_t src = 0,
 	return ebpf_inst{ opcode, dst, src, offset, imm };
 }
 
-bool hasEdge(const std::unique_ptr<G_t[]> &g, uint16_t src, uint16_t dst,
+bool hasEdge(const std::unique_ptr<G_t> &g, uint16_t src, uint16_t dst,
 	    FlowType t)
 {
-	for (const auto &edge : *g[src]) {
+	for (const auto &edge : g[src]) {
 		if (edge.dst == dst && edge.t == t)
 			return true;
 	}
 	return false;
 }
 
-std::size_t edgeCount(const std::unique_ptr<G_t[]> &g, uint16_t src)
+std::size_t edgeCount(const std::unique_ptr<G_t> &g, uint16_t src)
 {
-	return g[src]->size();
+	return g[src].size();
 }
 
 } // namespace

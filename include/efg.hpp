@@ -18,8 +18,8 @@ struct Edge{
     FlowType t;
 };
 
-using G_t=std::vector<Edge>*;//adjacency list represented using array of vec of edges. indices in the array corresponds to indices of insts.
+using G_t=std::vector<Edge>[];//adjacency list represented using array of vec of edges. indices in the array corresponds to indices of insts.
 
 // Builds an execution flow graph. EFG describes the order that instructions are executed; it's like a fine grained CFG. If inst1 will be executed immediately after inst0, then there will be an `Edge` from inst0 to inst1.
-std::unique_ptr<G_t[]> buildEFG(const std::vector<ebpf_inst>&);
+std::unique_ptr<G_t> buildEFG(const std::vector<ebpf_inst>&);
 #endif

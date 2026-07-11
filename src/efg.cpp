@@ -62,12 +62,10 @@ uint16_t callTarget(uint16_t pc, const ebpf_inst &inst)
 
 } // namespace
 
-std::unique_ptr<G_t[]> buildEFG(const std::vector<ebpf_inst> &instructions)
+std::unique_ptr<G_t> buildEFG(const std::vector<ebpf_inst> &instructions)
 {
 	const uint16_t n = static_cast<uint16_t>(instructions.size());
-	std::unique_ptr<G_t[]> G = std::make_unique<G_t[]>(n);
-	for (uint16_t i = 0; i < n; ++i)
-		G[i] = new std::vector<Edge>();
+	std::unique_ptr<G_t> G = std::make_unique<G_t>(n);
 
 	for (uint16_t i = 0; i < n; ++i) {
 		const ebpf_inst &cur = instructions[i];
@@ -80,22 +78,22 @@ std::unique_ptr<G_t[]> buildEFG(const std::vector<ebpf_inst> &instructions)
 		}
 
 		if (isLocalCall(cur)) {
-			G[i]->push_back(Edge{ callTarget(i, cur), Uncond });
+			G[i].push_back(Edge{ callTarget(i, cur), Uncond });
 		} else if (isCall(cur)) {
 			// External function call: falls through to the next
 			// instruction once the helper returns.
-			G[i]->push_back(Edge{ static_cast<uint16_t>(i + 1), Exit });
+			G[i].push_back(Edge{ static_cast<uint16_t>(i + 1), Exit });
 		} else if (isCondJump(cur)) {
-			G[i]->push_back(Edge{ jumpTarget(i, cur), Cond1 });
-			G[i]->push_back(Edge{ static_cast<uint16_t>(i + 1), Cond0 });
+			G[i].push_back(Edge{ jumpTarget(i, cur), Cond1 });
+			G[i].push_back(Edge{ static_cast<uint16_t>(i + 1), Cond0 });
 		} else if (isJa(cur)) {
-			G[i]->push_back(Edge{ jumpTarget(i, cur), Uncond });
+			G[i].push_back(Edge{ jumpTarget(i, cur), Uncond });
 		} else {
 			// Everything else (ALU, LD/LDX/ST/STX, atomics, the
 			// second slot of LDDW, FPU ALU/LD/ST, ...) simply
 			// falls through.
 			if (i + 1 < n)
-				G[i]->push_back(Edge{ static_cast<uint16_t>(i + 1), Normal });
+				G[i].push_back(Edge{ static_cast<uint16_t>(i + 1), Normal });
 		}
 	}
 
@@ -126,7 +124,7 @@ std::unique_ptr<G_t[]> buildEFG(const std::vector<ebpf_inst> &instructions)
 				uint16_t ret = callStack.back();
 				auto nextCallStack = callStack;
 				nextCallStack.pop_back();
-				G[pc]->push_back(Edge{ ret, Uncond });
+				G[pc].push_back(Edge{ ret, Uncond });
 				stack.push_back({ ret, std::move(nextCallStack) });
 				continue;
 			}
@@ -140,7 +138,7 @@ std::unique_ptr<G_t[]> buildEFG(const std::vector<ebpf_inst> &instructions)
 				continue;
 			}
 
-			for (const Edge &e : *G[pc])
+			for (const Edge &e : G[pc])
 				stack.push_back({ e.dst, callStack });
 		}
 	}
