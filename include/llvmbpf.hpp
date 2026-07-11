@@ -6,8 +6,6 @@
 #include <vector>
 #include <ebpf_inst.h>
 #include <string>
-#include <cstdint>
-#include <cstddef>
 
 #ifndef MAX_EXT_FUNCS
 #define MAX_EXT_FUNCS 8192
@@ -19,19 +17,6 @@ namespace bpftime
 struct external_function {
 	std::string name;
 	void *fn;
-};
-struct ExeState{
-	uint64_t ebpfRegs[10];//stores R0-R9 ebpf registers.
-	float fpuRegs[11];//stores additional FPU registers supported.
-
-	uint64_t &operator[](std::size_t index) noexcept
-	{
-		return ebpfRegs[index];
-	}
-	const uint64_t &operator[](std::size_t index) const noexcept
-	{
-		return ebpfRegs[index];
-	}
 };
 
 class llvm_bpf_jit_context;
@@ -85,17 +70,6 @@ class llvmbpf_vm {
 	// return the JITed function if success
 	std::optional<precompiled_ebpf_function> compile() noexcept;
 
-	/*
-	The JITed function will be additionally instrumented to store values of modified registers into `store` after eBPF instructions specified by `instsIdxs`.
-	
-	For example, suppose `instructions[instsIdxs[0]]` is a BPF_ADD with src=r0 and dst=r1. Then, after this eBPF instruction, we'll emit the necessary LLVM IR to store r1 into `store`.
-
-	The compiled function must have write access the provided memory reigon when it's ran. Assume the compiled function will be the only one using it (no race condition with external threads).
-
-	Assume `instsIdxs` contains valid indexes. `instsIdxs` are produced by `partitionPDG`.
-	*/
-	std::optional<precompiled_ebpf_function> compile(const std::vector<uint16_t> &instsIdxs,const ExeState* store);
-
 	// See the spec for details.
 	// If the code involve array map access, the map_val function
 	// needs to be provided.
@@ -111,8 +85,6 @@ class llvmbpf_vm {
 	std::optional<std::vector<uint8_t>>
 	generate_spirv(const char *target_env = "");
 
-	std::vector<ebpf_inst> instructions;//this will be used when calling `buildPDG`.
-
     private:
 	// See spec for details
 	uint64_t (*map_by_fd)(uint32_t) = nullptr;
@@ -121,7 +93,7 @@ class llvmbpf_vm {
 	uint64_t (*var_addr)(uint32_t) = nullptr;
 	uint64_t (*code_addr)(uint32_t) = nullptr;
 
-	
+	std::vector<ebpf_inst> instructions;
 
 	std::vector<std::optional<external_function> > ext_funcs;
 

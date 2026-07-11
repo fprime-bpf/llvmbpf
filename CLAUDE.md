@@ -1,10 +1,10 @@
 # CLAUDE.md
 
-This file provides guidance to agents working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
-llvmbpf is a userspace eBPF VM with LLVM JIT/AOT compiler. It compiles eBPF bytecode to native code via LLVM IR, supports multi-architecture execution, and provides AOT compilation of eBPF programs into standalone native ELF objects.
+llvmbpf is a high-performance userspace eBPF VM with LLVM JIT/AOT compiler. It compiles eBPF bytecode to native code via LLVM IR, supports multi-architecture execution (x86, ARM, NVPTX/CUDA), and provides AOT compilation of eBPF programs into standalone native ELF objects.
 
 This is a standalone VM library extracted from the bpftime project, focused solely on compilation and execution without maps, helpers, verifiers, or loaders.
 
@@ -57,7 +57,7 @@ cmake --build build --target all -j
 ### Run BPF Conformance Tests
 ```sh
 # Create Python virtual environment
-python3 -m venv ./test
+python3.8 -m venv ./test
 source test/bin/activate
 pip install -r test/requirements.txt
 
@@ -82,9 +82,7 @@ pytest -k "test_jit.py and not err-infinite"
 **VM Layer (`include/llvmbpf.hpp`, `src/vm.cpp`)**
 - `llvmbpf_vm`: Main VM class exposing the public API
 - `precompiled_ebpf_function`: Function pointer type for JITed code (signature: `uint64_t (*)(void *mem, size_t mem_len)`)
-- `ExeState`: type to store snapshot of eBPF registers. 
 - Key methods: `load_code()`, `compile()`, `exec()`, `do_aot_compile()`, `load_aot_object()`
-- `compile(const ExeState*)` will perform additional instrumentation to store snapshot of eBPF registers. The latest snapshot will be stored into the pointed memory.
 
 **JIT/AOT Compiler (`src/llvm_jit_context.cpp`, `src/llvm_jit_context.hpp`)**
 - `llvm_bpf_jit_context`: Internal LLVM compilation context
@@ -95,7 +93,6 @@ pytest -k "test_jit.py and not err-infinite"
 - `generateModule()`: Converts eBPF instructions to LLVM IR
 - Handles eBPF instruction set including LDDW (64-bit immediate loads)
 - Implements stack (512 bytes), registers (r0-r10), and external function calls
-- Optionally allows providing a pointer to `ExeState`.
 
 **Instruction Set (`src/ebpf_inst.h`)**
 - Defines eBPF instruction structure and opcodes
@@ -165,7 +162,3 @@ llvmbpf is designed as a component of the larger bpftime project. For loading eB
 - `example/load-llvm-ir/`: Load original LLVM IR instead of eBPF bytecode
 - `example/ptx/`: CUDA PTX generation examples (NVIDIA GPUs)
 - `example/spirv/`: SPIR-V generation examples (OpenCL, cross-vendor GPUs)
-
-## Tags
-- "v1": Stores the changed register after every modifing-instructions, including FPU registers.
-- "v2": After `call`: stores r1-r5. After `exit`: stores r0. After non-conditional jumps: stores r0-r9, f0-f10. After regular eBPF conditional jumps: stores r0-r9. After FPU conditional jumps: stores f0-f10.
