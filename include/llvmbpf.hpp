@@ -6,6 +6,7 @@
 #include <vector>
 #include <ebpf_inst.h>
 #include <string>
+#include<efg.hpp>
 
 #ifndef MAX_EXT_FUNCS
 #define MAX_EXT_FUNCS 8192
@@ -18,7 +19,10 @@ struct external_function {
 	std::string name;
 	void *fn;
 };
-
+struct ExecState{
+	uint64_t normRegs[10];//r0-r9
+	float fpuRegs[11];//fpu0-10.
+};
 class llvm_bpf_jit_context;
 
 // The JITed function signature.
@@ -70,6 +74,19 @@ class llvmbpf_vm {
 	// return the JITed function if success
 	std::optional<precompiled_ebpf_function> compile() noexcept;
 
+
+	/*
+	Like `compile`, but with additional instructions that will store snapshots of registers into the provided pointer at `instInfo`.
+
+	Consider instructions listed in `instInfo`. If the specified instruction is a conditional branch, insert snapshotting instructions right before it (otherwise we need to insert them at both true and false branch). 
+	If the specified instruction is a normal register-modifing instruction, snapshot right after it. If it's anything else (unconditional jumps), it doesn't matter whether the snapshot happens immediately before or after it.
+
+	Calls to external functions are considered register-modifing. Calls to local functions are unconditional jumps.
+
+	Only snapshot registers mentioned in `CompInfo` of the corresponding instruction.
+	*/
+	std::optional<precompiled_ebpf_function> compileWithSS(const ExecState*,const std::unordered_map<uint16_t,CompInfo>& instInfo) noexcept;
+
 	// See the spec for details.
 	// If the code involve array map access, the map_val function
 	// needs to be provided.
@@ -85,6 +102,8 @@ class llvmbpf_vm {
 	std::optional<std::vector<uint8_t>>
 	generate_spirv(const char *target_env = "");
 
+	std::vector<ebpf_inst> instructions;//will be used by `buildEFG` to build the graph.
+
     private:
 	// See spec for details
 	uint64_t (*map_by_fd)(uint32_t) = nullptr;
@@ -93,8 +112,11 @@ class llvmbpf_vm {
 	uint64_t (*var_addr)(uint32_t) = nullptr;
 	uint64_t (*code_addr)(uint32_t) = nullptr;
 
-	std::vector<ebpf_inst> instructions;
+	/*
+	There may be a need to implement a way for callers to specify `regOnlyExtFuncs` when calling `partition`. 
 
+	At "../../bpfwrappers.cpp:77", `.compile` will be switched to `.compileWithSS`, so `buildEFG` and `partition` will be called just before that.
+	*/
 	std::vector<std::optional<external_function> > ext_funcs;
 
 	std::unique_ptr<llvm_bpf_jit_context> jit_ctx;

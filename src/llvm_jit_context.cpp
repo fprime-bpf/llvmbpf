@@ -293,6 +293,32 @@ llvm::Error llvm_bpf_jit_context::do_jit_compile()
 	this->jit = std::move(jit);
 	return llvm::Error::success();
 }
+llvm::Error llvm_bpf_jit_context::do_jit_compile_with_ss(
+	uintptr_t register_state_store_addr,
+	const std::unordered_map<uint16_t, CompInfo> &instInfo)
+{
+	spin_lock_guard guard(compiling.get());
+	auto [jit, extFuncNames, definedLddwHelpers] =
+		create_and_initialize_lljit_instance();
+	if (!jit) {
+		return llvm::make_error<llvm::StringError>(
+			"jit initialization failed",
+			llvm::inconvertibleErrorCode());
+	}
+	auto bpfModuleOrErr = generateModule(
+		extFuncNames, definedLddwHelpers, true, true, "bpf_main",
+		false, &instInfo, register_state_store_addr);
+	if (!bpfModuleOrErr) {
+		return bpfModuleOrErr.takeError();
+	}
+	auto bpfModule = std::move(*bpfModuleOrErr);
+	bpfModule.withModuleDo([](auto &M) { optimizeModule(M); });
+	if (auto err = jit->addIRModule(std::move(bpfModule))) {
+		return err;
+	}
+	this->jit = std::move(jit);
+	return llvm::Error::success();
+}
 llvm_bpf_jit_context::~llvm_bpf_jit_context()
 {
 	pthread_spin_destroy(compiling.get());

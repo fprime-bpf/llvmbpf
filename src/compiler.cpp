@@ -91,7 +91,9 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	const std::vector<std::string> &extFuncNames,
 	const std::vector<std::string> &lddwHelpers,
 	bool patch_map_val_at_compile_time, bool main_func_with_arguments,
-	const std::string &func_name, bool is_gpu)
+	const std::string &func_name, bool is_gpu,
+	const std::unordered_map<uint16_t, CompInfo> *instInfo,
+	uintptr_t register_state_store_addr)
 {
 	SPDLOG_DEBUG(
 		"Generating module: patch_map_val_at_compile_time={}, with arguments={}, func_name={}, is_gpu={}",
@@ -100,6 +102,23 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	auto context = std::make_unique<LLVMContext>();
 	auto jitModule = std::make_unique<Module>("bpf-jit", *context);
 	const auto &insts = vm.instructions;
+	auto *registerStateStoreTy = Type::getInt64Ty(*context)->getPointerTo();
+	auto *registerStateStoreBase = register_state_store_addr == 0
+		? nullptr
+		: llvm::ConstantExpr::getIntToPtr(
+			llvm::ConstantInt::get(Type::getInt64Ty(*context),
+						register_state_store_addr),
+			registerStateStoreTy);
+	auto *fpuRegisterStateStoreTy =
+		Type::getFloatTy(*context)->getPointerTo();
+	auto *fpuRegisterStateStoreBase = register_state_store_addr == 0
+		? nullptr
+		: llvm::ConstantExpr::getIntToPtr(
+			llvm::ConstantInt::get(
+				Type::getInt64Ty(*context),
+				register_state_store_addr +
+					offsetof(ExecState, fpuRegs)),
+			fpuRegisterStateStoreTy);
 	if (insts.empty()) {
 		return llvm::make_error<llvm::StringError>(
 			"No instructions provided",
@@ -361,6 +380,52 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	// Iterate over instructions
 	BasicBlock *currBB = instBlocks[0];
 	IRBuilder<> builder(currBB);
+	// Emits stores of the given normal (r0-r9) registers into the
+	// snapshot buffer at the builder's current insert point.
+	auto emitRegisterSnapshot = [&](const CompInfo &info) {
+		if (!registerStateStoreBase)
+			return;
+		for (uint8_t reg = 0; reg < 10; reg++) {
+			if (!info.normRegModified(reg))
+				continue;
+			auto *slot = builder.CreateGEP(
+				builder.getInt64Ty(), registerStateStoreBase,
+				{ builder.getInt64(reg) });
+			builder.CreateStore(
+				builder.CreateLoad(builder.getInt64Ty(),
+						   regs[reg]),
+				slot);
+		}
+	};
+	// Emits stores of the given FPU (fpu0-fpu10) registers into the
+	// snapshot buffer at the builder's current insert point.
+	auto emitFPUSnapshot = [&](const CompInfo &info) {
+		if (!fpuRegisterStateStoreBase)
+			return;
+		for (uint8_t reg = 0; reg <= 10; reg++) {
+			if (!info.fpuRegModified(reg))
+				continue;
+			auto *slot = builder.CreateGEP(
+				builder.getFloatTy(), fpuRegisterStateStoreBase,
+				{ builder.getInt64(reg) });
+			builder.CreateStore(
+				builder.CreateLoad(builder.getFloatTy(),
+						   fregs[reg]),
+				slot);
+		}
+	};
+	// If `pc` is listed in `instInfo`, snapshot the registers marked
+	// modified in its CompInfo. Must be called with the builder's
+	// insert point already set to where the snapshot should land.
+	auto maybeSnapshot = [&](uint16_t pc) {
+		if (!instInfo)
+			return;
+		auto it = instInfo->find(pc);
+		if (it == instInfo->end())
+			return;
+		emitRegisterSnapshot(it->second);
+		emitFPUSnapshot(it->second);
+	};
 	for (uint16_t pc = 0; pc < insts.size(); pc++) {
 		auto inst = insts[pc];
 		if (blockBegin[pc]) {
@@ -442,6 +507,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 
 				emitStoreFPUResult(inst, &fregs[0], builder,
 						   src_val);
+				maybeSnapshot(pc);
 				break;
 			}
 			case DUO_OP_FADD_IMM:
@@ -459,6 +525,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 
 				emitFPUWithDstAndSrc(inst, builder, &fregs[0],
 						     func);
+				maybeSnapshot(pc);
 
 				break;
 			}
@@ -485,6 +552,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			case DUO_OP_FJULE_REG: {
 				auto f_cmp_func = get_fcmp_func(inst, builder);
 
+				maybeSnapshot(pc);
 				auto ret = emitCondJmpWithDstAndSrcFPU(
 					builder, pc, inst, instBlocks,
 					&fregs[0], f_cmp_func);
@@ -1182,6 +1250,7 @@ According to eBPF docs, it should actually be sign-extended to
 					}
 				}
 			}
+			maybeSnapshot(raw_pc);
 			break;
 		}
 			// JMP
@@ -1273,6 +1342,7 @@ According to eBPF docs, it should actually be sign-extended to
 				    !exp) {
 					return exp.takeError();
 				}
+				maybeSnapshot(pc);
 			}
 
 			break;
@@ -1297,6 +1367,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JEQ_IMM:
 		case EBPF_OP_JEQ32_REG:
 		case EBPF_OP_JEQ_REG: {
+			maybeSnapshot(pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1309,6 +1380,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JGT_IMM:
 		case EBPF_OP_JGT32_REG:
 		case EBPF_OP_JGT_REG: {
+			maybeSnapshot(pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1320,6 +1392,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JGE_IMM:
 		case EBPF_OP_JGE32_REG:
 		case EBPF_OP_JGE_REG: {
+			maybeSnapshot(pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1338,6 +1411,7 @@ According to eBPF docs, it should actually be sign-extended to
 				auto [src, dst, zero] =
 					emitJmpLoadSrcAndDstAndZero(
 						inst, &regs[0], builder);
+				maybeSnapshot(pc);
 				builder.CreateCondBr(
 					builder.CreateICmpNE(
 						builder.CreateAnd(dst, src),
@@ -1353,6 +1427,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JNE_IMM:
 		case EBPF_OP_JNE32_REG:
 		case EBPF_OP_JNE_REG: {
+			maybeSnapshot(pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1364,6 +1439,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JSGT_IMM:
 		case EBPF_OP_JSGT32_REG:
 		case EBPF_OP_JSGT_REG: {
+			maybeSnapshot(pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1375,6 +1451,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JSGE_IMM:
 		case EBPF_OP_JSGE32_REG:
 		case EBPF_OP_JSGE_REG: {
+			maybeSnapshot(pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1386,6 +1463,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JLT_IMM:
 		case EBPF_OP_JLT32_REG:
 		case EBPF_OP_JLT_REG: {
+			maybeSnapshot(pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1397,6 +1475,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JLE_IMM:
 		case EBPF_OP_JLE32_REG:
 		case EBPF_OP_JLE_REG: {
+			maybeSnapshot(pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1408,6 +1487,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JSLT_IMM:
 		case EBPF_OP_JSLT32_REG:
 		case EBPF_OP_JSLT_REG: {
+			maybeSnapshot(pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1419,6 +1499,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JSLE_IMM:
 		case EBPF_OP_JSLE32_REG:
 		case EBPF_OP_JSLE_REG: {
+			maybeSnapshot(pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1517,6 +1598,7 @@ According to eBPF docs, it should actually be sign-extended to
 					llvm::inconvertibleErrorCode());
 			}
 			}
+			maybeSnapshot(pc);
 			break;
 		}
 		default:
@@ -1525,6 +1607,73 @@ According to eBPF docs, it should actually be sign-extended to
 					std::to_string(inst.opcode) +
 					" at pc " + std::to_string(pc),
 				llvm::inconvertibleErrorCode());
+		}
+		// Snapshot after every plain register-modifying instruction
+		// (ALU/LD/LDX). Jumps, calls, EXIT and atomics are handled by
+		// maybeSnapshot() calls placed at their emission sites above.
+		switch (inst.opcode) {
+		case EBPF_OP_ADD64_IMM:
+		case EBPF_OP_ADD_IMM:
+		case EBPF_OP_ADD64_REG:
+		case EBPF_OP_ADD_REG:
+		case EBPF_OP_SUB64_IMM:
+		case EBPF_OP_SUB_IMM:
+		case EBPF_OP_SUB64_REG:
+		case EBPF_OP_SUB_REG:
+		case EBPF_OP_MUL64_IMM:
+		case EBPF_OP_MUL_IMM:
+		case EBPF_OP_MUL64_REG:
+		case EBPF_OP_MUL_REG:
+		case EBPF_OP_DIV64_IMM:
+		case EBPF_OP_DIV_IMM:
+		case EBPF_OP_DIV64_REG:
+		case EBPF_OP_DIV_REG:
+		case EBPF_OP_OR64_IMM:
+		case EBPF_OP_OR_IMM:
+		case EBPF_OP_OR64_REG:
+		case EBPF_OP_OR_REG:
+		case EBPF_OP_AND64_IMM:
+		case EBPF_OP_AND_IMM:
+		case EBPF_OP_AND64_REG:
+		case EBPF_OP_AND_REG:
+		case EBPF_OP_LSH64_IMM:
+		case EBPF_OP_LSH_IMM:
+		case EBPF_OP_LSH64_REG:
+		case EBPF_OP_LSH_REG:
+		case EBPF_OP_RSH64_IMM:
+		case EBPF_OP_RSH_IMM:
+		case EBPF_OP_RSH64_REG:
+		case EBPF_OP_RSH_REG:
+		case EBPF_OP_NEG:
+		case EBPF_OP_NEG64:
+		case EBPF_OP_MOD64_IMM:
+		case EBPF_OP_MOD_IMM:
+		case EBPF_OP_MOD64_REG:
+		case EBPF_OP_MOD_REG:
+		case EBPF_OP_XOR64_IMM:
+		case EBPF_OP_XOR_IMM:
+		case EBPF_OP_XOR64_REG:
+		case EBPF_OP_XOR_REG:
+		case EBPF_OP_MOV64_IMM:
+		case EBPF_OP_MOV_IMM:
+		case EBPF_OP_MOV64_REG:
+		case EBPF_OP_MOV_REG:
+		case EBPF_OP_ARSH64_IMM:
+		case EBPF_OP_ARSH_IMM:
+		case EBPF_OP_ARSH64_REG:
+		case EBPF_OP_ARSH_REG:
+		case EBPF_OP_LE:
+		case EBPF_OP_BE:
+		case EBPF_OP_BYTESWAP:
+		case EBPF_OP_LDXB:
+		case EBPF_OP_LDXH:
+		case EBPF_OP_LDXW:
+		case EBPF_OP_LDXDW: {
+			maybeSnapshot(pc);
+			break;
+		}
+		default:
+			break;
 		}
 	}
 

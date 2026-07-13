@@ -1,7 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include "llvmbpf.hpp"
+#include "efg.hpp"
 
 /*
 
@@ -100,6 +102,37 @@ TEST_CASE("Test simple cond")
 		REQUIRE(vm.exec(&mem, sizeof(mem), ret) != 0);
 		REQUIRE(vm.get_error_message() == "No instructions provided");
 	}
+}
+
+TEST_CASE("Test compileWithSS snapshots registers")
+{
+	bpftime::llvmbpf_vm vm;
+
+	REQUIRE(vm.load_code((const void *)simple_cond_1,
+			     sizeof(simple_cond_1) - 1) == 0);
+
+	const auto g = buildEFG(vm.instructions);
+	// maxSize=1 forces every instruction's boundary node into B, so we
+	// get a snapshot point after essentially every register write.
+	const auto instInfo =
+		partition(g.get(), vm.instructions, 1, true, {});
+	REQUIRE_FALSE(instInfo.empty());
+
+	bpftime::ExecState state{};
+	std::memset(&state, 0, sizeof(state));
+
+	auto func = vm.compileWithSS(&state, instInfo);
+	REQUIRE(func.has_value());
+
+	uint64_t ret = 0;
+	uint64_t mem = 0;
+	REQUIRE(vm.exec(&mem, sizeof(mem), ret) == 0);
+	REQUIRE(ret == 4);
+
+	// simple_cond_1 ends with `ldxw r0, [r10-4]; exit`, and that LDXW is
+	// a plain register-modifying instruction, so with maxSize=1 it must
+	// be a snapshot point: the buffer should reflect r0's final value.
+	REQUIRE(state.normRegs[0] == 4);
 }
 
 TEST_CASE("Test external function registration")
