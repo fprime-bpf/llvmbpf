@@ -181,8 +181,60 @@ TEST_CASE("partition: long straight-line chain gets cut to respect maxSize")
 	// All nodes here are register-only (pure ALU + EXIT), so every
 	// reported boundary node must be marked as living in a regOnly
 	// group.
-	for (const auto &[node, regOnly] : B)
-		REQUIRE(regOnly);
+	for (const auto &[node, info] : B)
+		REQUIRE(info.regOnly());
+}
+
+TEST_CASE("partition: reports which registers a group modifies")
+{
+	std::vector<ebpf_inst> instructions;
+	for (int i = 0; i < 9; ++i)
+		instructions.push_back(
+			makeInst(EBPF_OP_MOV64_IMM, 1, 0, 0, i));
+	// Last chain instruction writes r2 instead of r1.
+	instructions.back() = makeInst(EBPF_OP_MOV64_IMM, 2, 0, 0, 8);
+	instructions.push_back(makeInst(EBPF_OP_EXIT));
+
+	const auto g = buildEFG(instructions);
+	const auto B = partition(g.get(), instructions, 3, true, {});
+
+	REQUIRE_FALSE(B.empty());
+	for (const auto &[node, info] : B) {
+		REQUIRE(info.regOnly());
+		// Every group here only ever writes r1 and/or r2.
+		for (uint8_t r = 0; r < 10; ++r) {
+			if (r == 1 || r == 2)
+				continue;
+			REQUIRE_FALSE(info.normRegModified(r));
+		}
+	}
+}
+
+TEST_CASE("partition: external call is treated as modifying only r0")
+{
+	std::vector<ebpf_inst> instructions;
+	for (int i = 0; i < 3; ++i)
+		instructions.push_back(
+			makeInst(EBPF_OP_MOV64_IMM, 3, 0, 0, i));
+	instructions.push_back(makeInst(EBPF_OP_CALL, 0, 0, 0, 9)); // idx 3
+	for (int i = 0; i < 3; ++i)
+		instructions.push_back(
+			makeInst(EBPF_OP_MOV64_IMM, 4, 0, 0, i));
+	instructions.push_back(makeInst(EBPF_OP_EXIT));
+
+	const auto g = buildEFG(instructions);
+	// idx 9 registered as regOnly so the call's group can end up regOnly.
+	const auto B = partition(g.get(), instructions, 3, true, { 9 });
+
+	bool sawCallGroupBoundary = false;
+	for (const auto &[node, info] : B) {
+		if (node == 3) {
+			sawCallGroupBoundary = true;
+			REQUIRE(info.normRegModified(0));
+			REQUIRE_FALSE(info.normRegModified(3));
+		}
+	}
+	(void)sawCallGroupBoundary;
 }
 
 TEST_CASE("partition: memory access marks its group as not regOnly")
@@ -205,10 +257,10 @@ TEST_CASE("partition: memory access marks its group as not regOnly")
 	// The group containing the LDXDW instruction (index 4) must be
 	// reported as not regOnly wherever it shows up as a boundary node.
 	bool sawMemGroupBoundary = false;
-	for (const auto &[node, regOnly] : B) {
+	for (const auto &[node, info] : B) {
 		if (node == 4) {
 			sawMemGroupBoundary = true;
-			REQUIRE_FALSE(regOnly);
+			REQUIRE_FALSE(info.regOnly());
 		}
 	}
 	(void)sawMemGroupBoundary;
@@ -281,10 +333,10 @@ TEST_CASE("partition: external call not in regOnlyExtFuncs is memory-accessing")
 	const auto B = partition(g.get(), instructions, 3, true, {});
 
 	bool sawCallGroupBoundary = false;
-	for (const auto &[node, regOnly] : B) {
+	for (const auto &[node, info] : B) {
 		if (node == 3) {
 			sawCallGroupBoundary = true;
-			REQUIRE_FALSE(regOnly);
+			REQUIRE_FALSE(info.regOnly());
 		}
 	}
 	(void)sawCallGroupBoundary;

@@ -3,6 +3,7 @@
 #include <fpu_inst.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <numeric>
 #include <set>
@@ -91,6 +92,40 @@ bool isMemInst(const ebpf_inst &inst,
 struct UEdge {
 	uint16_t a, b;
 };
+
+// Marks the register (if any) that `inst` writes to in `info`. Calls to
+// external functions are treated as only modifying r0; local calls, EXIT,
+// stores (ST/STX/FST/FSTX) and conditional jumps write no register.
+void markModifiedReg(const ebpf_inst &inst,
+		      const std::unordered_set<int32_t> &regOnlyExtFuncs,
+		      CompInfo &info)
+{
+	if (duo_is_fpu(inst)) {
+		const auto cls = duo_class(inst);
+		if (cls == FALU || cls == FLDX) {
+			if (inst.dst <= 10)
+				info.modified[inst.dst + 10] = true;
+		}
+		return;
+	}
+
+	if (isCall(inst)) {
+		if (!isLocalCall(inst))
+			info.modified[0] = true; // external call: only r0
+		return;
+	}
+
+	if (isJmpClass(inst)) // conditional jumps write no register
+		return;
+
+	const auto cls = inst.opcode & EBPF_CLS_MASK;
+	if (cls == EBPF_CLS_ST || cls == EBPF_CLS_STX)
+		return;
+
+	// ALU/ALU64/LD(LDDW)/LDX all write `dst`.
+	if (inst.dst < 10)
+		info.modified[inst.dst] = true;
+}
 
 // Simple union-find over instruction indices, used to compute weakly
 // connected components of the (edges treated as bidirectional) graph.
@@ -233,13 +268,13 @@ uint16_t largestComponentSize(uint16_t n, const std::vector<UEdge> &edges,
 
 } // namespace
 
-std::unordered_map<uint16_t, bool>
+std::unordered_map<uint16_t, CompInfo>
 partition(const G_t G, const std::vector<ebpf_inst> &instructions,
 	  uint16_t maxSize, bool useSrc,
 	  const std::unordered_set<int32_t> &regOnlyExtFuncs) noexcept
 {
 	const uint16_t n = static_cast<uint16_t>(instructions.size());
-	std::unordered_map<uint16_t, bool> B;
+	std::unordered_map<uint16_t, CompInfo> B;
 	if (n == 0 || maxSize == 0)
 		return B;
 
@@ -325,27 +360,45 @@ partition(const G_t G, const std::vector<ebpf_inst> &instructions,
 	if (cutEdgeIdx.empty())
 		return B;
 
-	// Determine each remaining group's regOnly status from the final
-	// (post-cut) weak components.
+	// Determine each remaining group's regOnly status and modified-register
+	// set from the final (post-cut) weak components.
 	UnionFind uf(n);
 	for (std::size_t i = 0; i < edges.size(); ++i) {
 		if (!cutEdgeIdx.count(i))
 			uf.unite(edges[i].a, edges[i].b);
 	}
+	std::unordered_map<uint16_t, CompInfo> compInfo;
 	std::unordered_map<uint16_t, bool> compRegOnly;
 	for (uint16_t i = 0; i < n; ++i) {
 		uint16_t root = uf.find(i);
+
 		auto it = compRegOnly.find(root);
 		if (it == compRegOnly.end())
 			compRegOnly[root] = !isMem[i];
 		else if (isMem[i])
 			it->second = false;
+
+		markModifiedReg(instructions[i], regOnlyExtFuncs,
+				 compInfo[root]);
 	}
+	for (auto &[root, regOnly] : compRegOnly)
+		compInfo[root].modified[21] = regOnly;
 
 	for (std::size_t idx : cutEdgeIdx) {
 		uint16_t end = endOf(edges[idx]);
-		B[end] = compRegOnly[uf.find(end)];
+		B[end] = compInfo[uf.find(end)];
 	}
 
 	return B;
+}
+bool CompInfo::fpuRegModified(uint8_t i)const{
+	assert(i<=10);
+	return modified[i+10];
+}
+bool CompInfo::normRegModified(uint8_t i)const{
+	assert(i<10);
+	return modified[i];
+}
+bool CompInfo::regOnly()const noexcept{
+	return modified[21];//last index
 }
