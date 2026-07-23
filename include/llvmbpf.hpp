@@ -22,6 +22,7 @@ struct external_function {
 struct ExecState{
 	uint64_t normRegs[10];//r0-r9
 	float fpuRegs[11];//fpu0-10.
+	std::byte *mem;//memory. this pointer should be set before `compileWithSS` and remains constant until `exec` is done.
 };
 class llvm_bpf_jit_context;
 
@@ -76,16 +77,17 @@ class llvmbpf_vm {
 
 
 	/*
-	Like `compile`, but with additional instructions that will store snapshots of registers into the provided pointer at `instInfo`.
+	Like `compile`, but with additional instructions that will store snapshots of registers and memory into the provided pointer at `instInfo`.
 
 	Consider instructions listed in `instInfo`. If the specified instruction is a conditional branch, insert snapshotting instructions right before it (otherwise we need to insert them at both true and false branch). 
 	If the specified instruction is a normal register-modifing instruction, snapshot right after it. If it's anything else (unconditional jumps), it doesn't matter whether the snapshot happens immediately before or after it.
+	`mem` and `memSize` describes the reigon of memory allocated for the compiled program, copy these into `ExeState*->mem`. 
 
 	Calls to external functions are considered register-modifing. Calls to local functions are unconditional jumps.
 
-	Only snapshot registers mentioned in `CompInfo` of the corresponding instruction.
+	Only snapshot registers mentioned in `CompInfo` of the corresponding instruction. Don't snapshot memory if the component of the instruction described in `CompInfo` is register-only.
 	*/
-	std::optional<precompiled_ebpf_function> compileWithSS(const ExecState*,const std::unordered_map<uint16_t,CompInfo>& instInfo) noexcept;
+	std::optional<precompiled_ebpf_function> compileWithSS(const ExecState* store,const std::unordered_map<uint16_t,CompInfo>& instInfo,const std::byte* mem,const uint16_t memSize) noexcept;
 
 	// See the spec for details.
 	// If the code involve array map access, the map_val function

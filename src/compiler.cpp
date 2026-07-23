@@ -93,7 +93,8 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	bool patch_map_val_at_compile_time, bool main_func_with_arguments,
 	const std::string &func_name, bool is_gpu,
 	const std::unordered_map<uint16_t, CompInfo> *instInfo,
-	uintptr_t register_state_store_addr)
+	uintptr_t register_state_store_addr, uintptr_t mem_snapshot_src_addr,
+	uintptr_t mem_snapshot_dst_addr, uint16_t mem_snapshot_size)
 {
 	SPDLOG_DEBUG(
 		"Generating module: patch_map_val_at_compile_time={}, with arguments={}, func_name={}, is_gpu={}",
@@ -119,6 +120,23 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 				register_state_store_addr +
 					offsetof(ExecState, fpuRegs)),
 			fpuRegisterStateStoreTy);
+	auto *i8PtrTy = Type::getInt8Ty(*context)->getPointerTo();
+	// Constant source/destination pointers for the memory snapshot memcpy.
+	// Both the program's memory buffer and ExecState->mem are fixed for
+	// the lifetime of the compiled function, so they're baked in as
+	// immediates rather than loaded at runtime.
+	auto *memSnapshotSrc = mem_snapshot_size == 0 ?
+		nullptr :
+		llvm::ConstantExpr::getIntToPtr(
+			llvm::ConstantInt::get(Type::getInt64Ty(*context),
+						mem_snapshot_src_addr),
+			i8PtrTy);
+	auto *memSnapshotDst = mem_snapshot_size == 0 ?
+		nullptr :
+		llvm::ConstantExpr::getIntToPtr(
+			llvm::ConstantInt::get(Type::getInt64Ty(*context),
+						mem_snapshot_dst_addr),
+			i8PtrTy);
 	if (insts.empty()) {
 		return llvm::make_error<llvm::StringError>(
 			"No instructions provided",
@@ -414,6 +432,15 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 				slot);
 		}
 	};
+	// Emits a single memcpy of the program's memory buffer into the
+	// ExecState snapshot buffer, at the builder's current insert point.
+	auto emitMemSnapshot = [&]() {
+		if (!memSnapshotSrc || !memSnapshotDst)
+			return;
+		builder.CreateMemCpy(memSnapshotDst, MaybeAlign(1),
+				     memSnapshotSrc, MaybeAlign(1),
+				     builder.getInt64(mem_snapshot_size));
+	};
 	// If `pc` is listed in `instInfo`, snapshot the registers marked
 	// modified in its CompInfo. Must be called with the builder's
 	// insert point already set to where the snapshot should land.
@@ -425,6 +452,8 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			return;
 		emitRegisterSnapshot(it->second);
 		emitFPUSnapshot(it->second);
+		if (!it->second.regOnly())
+			emitMemSnapshot();
 	};
 	for (uint16_t pc = 0; pc < insts.size(); pc++) {
 		auto inst = insts[pc];
@@ -970,24 +999,28 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_STB:
 		case EBPF_OP_STXB: {
 			emitStore(inst, builder, &regs[0], builder.getInt8Ty());
+			maybeSnapshot(pc);
 			break;
 		}
 		case EBPF_OP_STH:
 		case EBPF_OP_STXH: {
 			emitStore(inst, builder, &regs[0],
 				  builder.getInt16Ty());
+			maybeSnapshot(pc);
 			break;
 		}
 		case EBPF_OP_STW:
 		case EBPF_OP_STXW: {
 			emitStore(inst, builder, &regs[0],
 				  builder.getInt32Ty());
+			maybeSnapshot(pc);
 			break;
 		}
 		case EBPF_OP_STDW:
 		case EBPF_OP_STXDW: {
 			emitStore(inst, builder, &regs[0],
 				  builder.getInt64Ty());
+			maybeSnapshot(pc);
 			break;
 		}
 			// LDX

@@ -121,7 +121,7 @@ TEST_CASE("Test compileWithSS snapshots registers")
 	bpftime::ExecState state{};
 	std::memset(&state, 0, sizeof(state));
 
-	auto func = vm.compileWithSS(&state, instInfo);
+	auto func = vm.compileWithSS(&state, instInfo, nullptr, 0);
 	REQUIRE(func.has_value());
 
 	uint64_t ret = 0;
@@ -133,6 +133,49 @@ TEST_CASE("Test compileWithSS snapshots registers")
 	// a plain register-modifying instruction, so with maxSize=1 it must
 	// be a snapshot point: the buffer should reflect r0's final value.
 	REQUIRE(state.normRegs[0] == 4);
+}
+
+TEST_CASE("Test compileWithSS snapshots memory")
+{
+	// r2 = 0x42; *(u8 *)(r1 + 0) = r2; r0 = 4; exit
+	// Writes into the program's memory buffer (pointed to by r1), so a
+	// memory snapshot point must capture that write.
+	std::vector<ebpf_inst> insts = {
+		{ EBPF_OP_MOV_IMM, BPF_REG_2, 0, 0, 0x42 },
+		{ EBPF_OP_STXB, BPF_REG_1, BPF_REG_2, 0, 0 },
+		{ EBPF_OP_MOV_IMM, BPF_REG_0, 0, 0, 4 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+	};
+
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.load_code(insts.data(), insts.size() * sizeof(ebpf_inst)) ==
+		0);
+
+	const auto g = buildEFG(vm.instructions);
+	const auto instInfo = partition(g.get(), vm.instructions, 1, true, {});
+	REQUIRE_FALSE(instInfo.empty());
+
+	bpftime::ExecState state{};
+	std::memset(&state, 0, sizeof(state));
+	constexpr uint16_t memSize = 8;
+	uint8_t snapshotBuf[memSize] = {};
+	state.mem = reinterpret_cast<std::byte *>(snapshotBuf);
+
+	uint8_t progMem[memSize] = {};
+	auto func = vm.compileWithSS(
+		&state, instInfo,
+		reinterpret_cast<const std::byte *>(progMem), memSize);
+	REQUIRE(func.has_value());
+
+	uint64_t ret = 0;
+	REQUIRE(vm.exec(progMem, memSize, ret) == 0);
+	REQUIRE(ret == 4);
+
+	// The STXB writes 0x42 into progMem[0]; that write must have been
+	// snapshotted into snapshotBuf by the memory snapshot at some
+	// non-regOnly boundary at or after the STXB.
+	REQUIRE(progMem[0] == 0x42);
+	REQUIRE(snapshotBuf[0] == 0x42);
 }
 
 TEST_CASE("Test external function registration")

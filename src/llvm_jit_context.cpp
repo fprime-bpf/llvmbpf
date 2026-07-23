@@ -295,7 +295,9 @@ llvm::Error llvm_bpf_jit_context::do_jit_compile()
 }
 llvm::Error llvm_bpf_jit_context::do_jit_compile_with_ss(
 	uintptr_t register_state_store_addr,
-	const std::unordered_map<uint16_t, CompInfo> &instInfo)
+	const std::unordered_map<uint16_t, CompInfo> &instInfo,
+	uintptr_t mem_snapshot_src_addr, uintptr_t mem_snapshot_dst_addr,
+	uint16_t mem_snapshot_size)
 {
 	spin_lock_guard guard(compiling.get());
 	auto [jit, extFuncNames, definedLddwHelpers] =
@@ -307,7 +309,9 @@ llvm::Error llvm_bpf_jit_context::do_jit_compile_with_ss(
 	}
 	auto bpfModuleOrErr = generateModule(
 		extFuncNames, definedLddwHelpers, true, true, "bpf_main",
-		false, &instInfo, register_state_store_addr);
+		false, &instInfo, register_state_store_addr,
+		mem_snapshot_src_addr, mem_snapshot_dst_addr,
+		mem_snapshot_size);
 	if (!bpfModuleOrErr) {
 		return bpfModuleOrErr.takeError();
 	}

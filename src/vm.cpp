@@ -110,7 +110,8 @@ std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compile() noexcept
 
 std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compileWithSS(
 	const ExecState *store,
-	const std::unordered_map<uint16_t, CompInfo> &instInfo) noexcept
+	const std::unordered_map<uint16_t, CompInfo> &instInfo,
+	const std::byte *mem, const uint16_t memSize) noexcept
 {
 	if (jitted_function) {
 		error_msg = "Already compiled";
@@ -118,7 +119,9 @@ std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compileWithSS(
 	}
 	try {
 		auto res = jit_ctx->do_jit_compile_with_ss(
-			reinterpret_cast<uintptr_t>(store), instInfo);
+			reinterpret_cast<uintptr_t>(store), instInfo,
+			reinterpret_cast<uintptr_t>(mem),
+			reinterpret_cast<uintptr_t>(store->mem), memSize);
 		if (res) {
 			LLVMErrorRef llvmError = llvm::wrap(std::move(res));
 			error_msg = LLVMGetErrorMessage(llvmError);
