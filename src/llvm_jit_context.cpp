@@ -335,7 +335,10 @@ std::vector<uint8_t> llvm_bpf_jit_context::do_aot_compile(
 	SPDLOG_DEBUG("AOT: start");
 	if (auto module = generateModule(extFuncNames, lddwHelpers, false);
 	    module) {
-		auto defaultTargetTriple = llvm::sys::getDefaultTargetTriple();
+		auto defaultTargetTriple =
+			std::string("riscv64-unknown-linux-gnu");
+		auto targetCPU = std::string("generic-rv64");
+		auto targetFeatures = std::string("+m,+a,+f,+d,+c");
 		SPDLOG_DEBUG("AOT: target triple: {}", defaultTargetTriple);
 		return module->withModuleDo([&](auto &module)
 						    -> std::vector<uint8_t> {
@@ -355,7 +358,7 @@ std::vector<uint8_t> llvm_bpf_jit_context::do_aot_compile(
 					"Unable to get local target");
 			}
 			auto targetMachine = target->createTargetMachine(
-				defaultTargetTriple, "generic", "",
+				defaultTargetTriple, targetCPU, targetFeatures,
 				TargetOptions(), Reloc::PIC_);
 			if (!targetMachine) {
 				SPDLOG_ERROR("Unable to create target machine");

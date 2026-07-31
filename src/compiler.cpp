@@ -477,13 +477,9 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 				 * used in FLDX and FST(X) ops - If so, then we
 				 * need to add that */
 			case DUO_OP_FSTX:
-			case DUO_OP_FST:
-			case DUO_OP_FLDX: {
+			case DUO_OP_FST: {
 				Value *src_val;
 
-				/* Can't use emitLoadFPUSource directly on
-				 * Load+Store instructions because they don't
-				 * use FIMM / FREG */
 				if (duo_class(inst) == FST) {
 					/* bit_cast is introduced in c++20 -
 					 * previous versions might have to use
@@ -495,43 +491,49 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 					/* convert c++ float to llvm float */
 					src_val = llvm::ConstantFP::get(
 						builder.getFloatTy(), flt);
-
-				} else if (duo_class(inst) == FLDX) {
-					/* We're likely loading a value off the
-					 * stack */
-					if (inst.offset != 0 &&
-					    inst.src == 0xa) {
-						SPDLOG_DEBUG("loading off stack..");
-
-						/* ptr to value off the stack
-						 * We insert regs, not fregs,
-						 * since that's where the
-						 * stack is at */
-						auto gep = emitLDXLoadingAddr(
-							builder, &regs[0],
-							inst);
-
-						/* Convert ptr to float ptr */
-						auto addr = builder.CreateBitCast(
-							gep,
-							builder.getFloatTy()
-								->getPointerTo());
-
-						/* dereference the ptr to
-						 * grab the float */
-						src_val = builder.CreateLoad(
-							builder.getFloatTy(),
-							addr);
-
-					} else {
-						src_val = builder.CreateLoad(
-							builder.getFloatTy(),
-							regs[inst.src]);
-					}
 				} else {
 					src_val = builder.CreateLoad(
 						builder.getFloatTy(),
 						fregs[inst.src]);
+				}
+
+				auto addr = builder.CreateGEP(
+					builder.getInt8Ty(),
+					builder.CreateLoad(builder.getPtrTy(),
+							   regs[inst.dst]),
+					{ builder.getInt64(inst.offset) });
+				builder.CreateStore(src_val, addr);
+				break;
+			}
+			case DUO_OP_FLDX: {
+				Value *src_val;
+
+				/* We're likely loading a value off the
+				 * stack */
+				if (inst.offset != 0 && inst.src == 0xa) {
+					SPDLOG_DEBUG("loading off stack..");
+
+					/* ptr to value off the stack
+					 * We insert regs, not fregs,
+					 * since that's where the
+					 * stack is at */
+					auto gep = emitLDXLoadingAddr(
+						builder, &regs[0], inst);
+
+					/* Convert ptr to float ptr */
+					auto addr = builder.CreateBitCast(
+						gep, builder.getFloatTy()
+							     ->getPointerTo());
+
+					/* dereference the ptr to
+					 * grab the float */
+					src_val = builder.CreateLoad(
+						builder.getFloatTy(), addr);
+
+				} else {
+					src_val = builder.CreateLoad(
+						builder.getFloatTy(),
+						regs[inst.src]);
 				}
 
 				emitStoreFPUResult(inst, &fregs[0], builder,
@@ -628,8 +630,23 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		switch (inst.opcode) {
 			// ALU
 		case EBPF_OP_ADD64_IMM:
+		case EBPF_OP_ADD64_REG: {
+			emitALUWithDstAndSrc(
+				inst, builder, &regs[0],
+				[&](Value *dst_val, Value *src_val) {
+					auto ptr_val = builder.CreateIntToPtr(
+						dst_val, builder.getPtrTy());
+					auto result_ptr = builder.CreateGEP(
+						builder.getInt8Ty(), ptr_val,
+						{ src_val });
+					return builder.CreatePtrToInt(
+						result_ptr,
+						builder.getInt64Ty());
+				});
+
+			break;
+		}
 		case EBPF_OP_ADD_IMM:
-		case EBPF_OP_ADD64_REG:
 		case EBPF_OP_ADD_REG: {
 			emitALUWithDstAndSrc(
 				inst, builder, &regs[0],
@@ -641,8 +658,24 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			break;
 		}
 		case EBPF_OP_SUB64_IMM:
+		case EBPF_OP_SUB64_REG: {
+			emitALUWithDstAndSrc(
+				inst, builder, &regs[0],
+				[&](Value *dst_val, Value *src_val) {
+					auto ptr_val = builder.CreateIntToPtr(
+						dst_val, builder.getPtrTy());
+					auto neg_src_val =
+						builder.CreateNeg(src_val);
+					auto result_ptr = builder.CreateGEP(
+						builder.getInt8Ty(), ptr_val,
+						{ neg_src_val });
+					return builder.CreatePtrToInt(
+						result_ptr,
+						builder.getInt64Ty());
+				});
+			break;
+		}
 		case EBPF_OP_SUB_IMM:
-		case EBPF_OP_SUB64_REG:
 		case EBPF_OP_SUB_REG: {
 			emitALUWithDstAndSrc(
 				inst, builder, &regs[0],
