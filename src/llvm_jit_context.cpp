@@ -516,7 +516,21 @@ llvm_bpf_jit_context::create_and_initialize_lljit_instance()
 		}
 	}
 #endif
-	auto jit_err = LLJITBuilder().create();
+	auto jtmb = JITTargetMachineBuilder::detectHost();
+	LLJITBuilder builder;
+	if (jtmb) {
+#if LLVM_VERSION_MAJOR >= 18
+		jtmb->setCodeGenOptLevel(CodeGenOptLevel::Aggressive);
+#else
+		jtmb->setCodeGenOptLevel(CodeGenOpt::Aggressive);
+#endif
+		builder.setJITTargetMachineBuilder(*jtmb);
+	} else {
+		SPDLOG_DEBUG(
+			"LLVM-JIT: failed to detect host for JITTargetMachineBuilder, using default");
+		llvm::consumeError(jtmb.takeError());
+	}
+	auto jit_err = builder.create();
 	if (!jit_err) {
 		exitOnErr(jit_err.takeError());
 		return std::make_tuple(nullptr, std::vector<std::string>{},
