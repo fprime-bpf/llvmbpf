@@ -73,7 +73,7 @@ class llvmbpf_vm {
 
 	// Compile the eBPF program into a JITed function
 	// return the JITed function if success
-	std::optional<precompiled_ebpf_function> compile(uint8_t maxFuncNestDepth,uint16_t frameSize) noexcept;
+	std::optional<precompiled_ebpf_function> compile(uint8_t maxFuncNestDepth=8,uint16_t frameSize=10000) noexcept;
 
 
 	/*
