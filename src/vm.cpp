@@ -122,8 +122,7 @@ std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compileWithSS(
 	try {
 		auto res = jit_ctx->do_jit_compile_with_ss(
 			maxFuncNestDepth, frameSize,
-			reinterpret_cast<uintptr_t>(store), instInfo,
-			reinterpret_cast<uintptr_t>(store->mem));
+			reinterpret_cast<uintptr_t>(store), instInfo);
 		if (res) {
 			LLVMErrorRef llvmError = llvm::wrap(std::move(res));
 			error_msg = LLVMGetErrorMessage(llvmError);

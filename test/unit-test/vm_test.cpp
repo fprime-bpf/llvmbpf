@@ -121,8 +121,12 @@ TEST_CASE("Test compileWithSS snapshots registers")
 	bpftime::ExecState state{};
 	std::memset(&state, 0, sizeof(state));
 	uint64_t mem = 0;
-	uint64_t snapshotBuf = 0;
-	state.mem = reinterpret_cast<std::byte *>(&snapshotBuf);
+	uint64_t heapBuf = 0;
+	uint8_t dataStackBuf[512] = {};
+	uint8_t callStackBuf[5 * sizeof(void *)] = {};
+	state.heap = reinterpret_cast<std::byte *>(&heapBuf);
+	state.dataStack = reinterpret_cast<std::byte *>(dataStackBuf);
+	state.callStack = reinterpret_cast<std::byte *>(callStackBuf);
 
 	auto func = vm.compileWithSS(&state, instInfo, 1, 512);
 	REQUIRE(func.has_value());
@@ -161,7 +165,11 @@ TEST_CASE("Test compileWithSS snapshots memory")
 	std::memset(&state, 0, sizeof(state));
 	constexpr uint16_t memSize = 8;
 	uint8_t snapshotBuf[memSize] = {};
-	state.mem = reinterpret_cast<std::byte *>(snapshotBuf);
+	uint8_t dataStackBuf[512] = {};
+	uint8_t callStackBuf[5 * sizeof(void *)] = {};
+	state.heap = reinterpret_cast<std::byte *>(snapshotBuf);
+	state.dataStack = reinterpret_cast<std::byte *>(dataStackBuf);
+	state.callStack = reinterpret_cast<std::byte *>(callStackBuf);
 
 	uint8_t progMem[memSize] = {};
 	// The heap to snapshot is the buffer passed to exec() below, not a
@@ -178,6 +186,119 @@ TEST_CASE("Test compileWithSS snapshots memory")
 	// non-regOnly boundary at or after the STXB.
 	REQUIRE(progMem[0] == 0x42);
 	REQUIRE(snapshotBuf[0] == 0x42);
+}
+
+TEST_CASE("Test compileWithSS snapshots the data stack")
+{
+	// simple_cond_1 stores into [r10-4]/[r10-8]/[r10-12], i.e. the data
+	// stack of the single (top-level) frame.
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.load_code((const void *)simple_cond_1,
+			     sizeof(simple_cond_1) - 1) == 0);
+
+	const auto g = buildEFG(vm.instructions);
+	const auto instInfo = partition(g.get(), vm.instructions, 1, true, {});
+	REQUIRE_FALSE(instInfo.empty());
+
+	constexpr uint16_t frameSize = 512;
+	bpftime::ExecState state{};
+	uint64_t heapBuf = 0;
+	uint8_t dataStackBuf[frameSize] = {};
+	uint8_t callStackBuf[5 * sizeof(void *)] = {};
+	state.heap = reinterpret_cast<std::byte *>(&heapBuf);
+	state.dataStack = reinterpret_cast<std::byte *>(dataStackBuf);
+	state.callStack = reinterpret_cast<std::byte *>(callStackBuf);
+
+	auto func = vm.compileWithSS(&state, instInfo, 1, frameSize);
+	REQUIRE(func.has_value());
+
+	uint64_t mem = 0, ret = 0;
+	REQUIRE(vm.exec(&mem, sizeof(mem), ret) == 0);
+	REQUIRE(ret == 4);
+
+	// The program never calls a local function, so it stays in the
+	// top-level frame: exactly one frame is in use.
+	REQUIRE(state.dataStackOffset == frameSize);
+	// Nothing was pushed onto the call stack.
+	REQUIRE(state.callStackSize == 0);
+	// The final `ldxw r0, [r10-4]` reads back the 4 the program stored at
+	// [r10-4]; that store must appear at the top of the copied region,
+	// since dataStack holds [r10-frameSize, stackEnd) and r10 == stackEnd.
+	uint32_t stored = 0;
+	std::memcpy(&stored, dataStackBuf + state.dataStackOffset - 4,
+		    sizeof(stored));
+	REQUIRE(stored == 4);
+}
+
+TEST_CASE("Test compileWithSS snapshots stacks across a local call")
+{
+	// r0 = 0; call +1 (local); exit
+	// callee: r1 = 7; *(u32 *)(r10-4) = r1; r0 = 4; exit
+	// The local call pushes a frame, so at a snapshot point inside the
+	// callee both stacks have live contents to capture. The value is set
+	// inside the callee: r1 is caller-saved (only r6-r9 are preserved
+	// across a local call), so setting it before the call proves nothing.
+	// The leading MOV keeps the call off pc=0, which the compiler needs in
+	// order to record a return block for it.
+	std::vector<ebpf_inst> insts = {
+		{ EBPF_OP_MOV_IMM, BPF_REG_0, 0, 0, 0 },
+		{ EBPF_OP_CALL, 0, 0x01, 0, 1 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+		{ EBPF_OP_MOV_IMM, BPF_REG_1, 0, 0, 7 },
+		{ EBPF_OP_STXW, BPF_REG_10, BPF_REG_1, -4, 0 },
+		{ EBPF_OP_MOV_IMM, BPF_REG_0, 0, 0, 4 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+	};
+
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.load_code(insts.data(), insts.size() * sizeof(ebpf_inst)) ==
+		0);
+
+	const auto g = buildEFG(vm.instructions);
+	const auto full = partition(g.get(), vm.instructions, 1, true, {});
+	REQUIRE_FALSE(full.empty());
+	// Snapshot only at the callee's store (pc=4). A single ExecState is
+	// overwritten by every snapshot point, so restricting it to one point
+	// inside the callee is what lets us observe the live frame; with every
+	// point enabled the last write would come from after the unwind.
+	auto it = full.find(4);
+	REQUIRE(it != full.end());
+	REQUIRE(it->second.usedStack());
+	const std::unordered_map<uint16_t, CompInfo> instInfo{ *it };
+
+	constexpr uint16_t frameSize = 512;
+	constexpr uint8_t maxDepth = 4;
+	bpftime::ExecState state{};
+	uint64_t heapBuf = 0;
+	uint8_t dataStackBuf[frameSize * maxDepth] = {};
+	uint8_t callStackBuf[5 * maxDepth * sizeof(void *)] = {};
+	state.heap = reinterpret_cast<std::byte *>(&heapBuf);
+	state.dataStack = reinterpret_cast<std::byte *>(dataStackBuf);
+	state.callStack = reinterpret_cast<std::byte *>(callStackBuf);
+
+	auto func = vm.compileWithSS(&state, instInfo, maxDepth, frameSize);
+	REQUIRE(func.has_value());
+
+	uint64_t mem = 0, ret = 0;
+	REQUIRE(vm.exec(&mem, sizeof(mem), ret) == 0);
+	REQUIRE(ret == 4);
+
+	// The recorded metadata must stay within the bounds the caller
+	// allocated, otherwise the memcpy would have overrun the buffers.
+	REQUIRE(state.dataStackOffset <= frameSize * maxDepth);
+	REQUIRE(state.callStackSize <= 5 * maxDepth);
+	// While the callee's frame is live, r10 sits one frameSize below
+	// stackEnd, so with the entry frame plus the callee's frame two frames
+	// are in use, along with the five call stack slots pushed by the call.
+	REQUIRE(state.dataStackOffset == 2 * frameSize);
+	REQUIRE(state.callStackSize == 5);
+	// dataStack holds [r10-frameSize, stackEnd), so the callee's store to
+	// [r10-4] sits frameSize+4 bytes below the top of the copied region.
+	uint32_t stored = 0;
+	std::memcpy(&stored,
+		    dataStackBuf + state.dataStackOffset - frameSize - 4,
+		    sizeof(stored));
+	REQUIRE(stored == 7);
 }
 
 TEST_CASE("Test external function registration")

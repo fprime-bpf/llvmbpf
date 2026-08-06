@@ -89,7 +89,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	bool patch_map_val_at_compile_time, bool main_func_with_arguments,
 	const std::string &func_name, bool is_gpu,
 	const std::unordered_map<uint16_t, CompInfo> *instInfo,
-	uintptr_t register_state_store_addr, uintptr_t mem_snapshot_dst_addr)
+	uintptr_t register_state_store_addr)
 {
 	const uint32_t dataStackSize =
 		static_cast<uint32_t>(frameSize) * maxFuncNestDepth;
@@ -119,13 +119,25 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 					offsetof(ExecState, fpuRegs)),
 			fpuRegisterStateStoreTy);
 	auto *i8PtrTy = Type::getInt8Ty(*context)->getPointerTo();
-	// ExecState->mem is fixed for the lifetime of the compiled function, so it's baked in as an immediate. The source and length are the heap buffer passed to the compiled function at runtime, so they're read from its arguments (see memSnapshotSrc/memSnapshotLen below).
-	auto *memSnapshotDst = mem_snapshot_dst_addr == 0 ?
-		nullptr :
-		llvm::ConstantExpr::getIntToPtr(
+	auto execStateField = [&](size_t off, llvm::Type *ty) -> Constant * {
+		if (register_state_store_addr == 0)
+			return nullptr;
+		return llvm::ConstantExpr::getIntToPtr(
 			llvm::ConstantInt::get(Type::getInt64Ty(*context),
-						mem_snapshot_dst_addr),
-			i8PtrTy);
+					       register_state_store_addr + off),
+			ty->getPointerTo());
+	};
+	auto *heapSnapshotDstSlot =
+		execStateField(offsetof(ExecState, heap), i8PtrTy);
+	auto *dataStackSnapshotDstSlot =
+		execStateField(offsetof(ExecState, dataStack), i8PtrTy);
+	auto *callStackSnapshotDstSlot =
+		execStateField(offsetof(ExecState, callStack), i8PtrTy);
+	// Relative stack metadata, written alongside the stack copies.
+	auto *dataStackOffsetSlot = execStateField(
+		offsetof(ExecState, dataStackOffset), Type::getInt32Ty(*context));
+	auto *callStackSizeSlot = execStateField(
+		offsetof(ExecState, callStackSize), Type::getInt16Ty(*context));
 	if (insts.empty()) {
 		return llvm::make_error<llvm::StringError>(
 			"No instructions provided",
@@ -224,6 +236,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	// Stack used to save return address and saved registers
 	Value *callStack, *callItemCnt;
 	Value *memSnapshotSrc = nullptr, *memSnapshotLen = nullptr;
+	Value *stackEnd = nullptr;
 	{
 		BasicBlock *setupBlock =
 			BasicBlock::Create(*context, "setupBlock", bpf_func);
@@ -254,7 +267,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 				builder.getInt8Ty(),
 				builder.getInt32(dataStackSize), "stackBegin");
 		}
-		auto stackEnd = builder.CreateGEP(
+		stackEnd = builder.CreateGEP(
 			builder.getInt8Ty(), stackBegin,
 			{ builder.getInt32(dataStackSize) }, "stackEnd");
 		// Write stack pointer into r10
@@ -425,12 +438,71 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	};
 	// Emits a single memcpy of the program's heap buffer into the
 	// ExecState snapshot buffer, at the builder's current insert point.
-	auto emitMemSnapshot = [&]() {
-		if (!memSnapshotSrc || !memSnapshotDst)
+	// Unlike the stacks, the used portion of the heap can't be determined,
+	// so the whole buffer is copied.
+	auto emitHeapSnapshot = [&]() {
+		if (!memSnapshotSrc || !heapSnapshotDstSlot)
 			return;
-		builder.CreateMemCpy(memSnapshotDst, MaybeAlign(1),
-				     memSnapshotSrc, MaybeAlign(1),
-				     memSnapshotLen);
+		auto *dst = builder.CreateLoad(builder.getPtrTy(),
+					       heapSnapshotDstSlot);
+		builder.CreateMemCpy(dst, MaybeAlign(1), memSnapshotSrc,
+				     MaybeAlign(1), memSnapshotLen);
+	};
+	// Emits copies of the live portions of both stacks, plus the relative
+	// metadata needed to restore them into a differently-located region.
+	//
+	// Data stack: r10 grows downward from stackEnd, and each frame is
+	// addressed at negative offsets from r10 (e.g. [r10-4]), so the frame
+	// currently in use lies *below* r10. The live region is therefore
+	// [r10-frameSize, stackEnd) and dataStackOffset is its length. Frames
+	// below that (deeper than the current call depth) are never copied.
+	//
+	// Call stack: callItemCnt counts the slots in use (5 per active frame),
+	// so the live region is the first callItemCnt entries and
+	// callStackSize = callItemCnt.
+	auto emitStackSnapshot = [&]() {
+		if (!dataStackOffsetSlot)
+			return;
+		// --- data stack ---
+		auto *r10 = builder.CreateLoad(builder.getInt64Ty(), regs[10]);
+		auto *endInt = builder.CreatePtrToInt(stackEnd,
+						      builder.getInt64Ty());
+		// Base of the frame in use: one frameSize below r10.
+		auto *liveBase =
+			builder.CreateSub(r10, builder.getInt64(frameSize),
+					  "dataStackLiveBase");
+		auto *used =
+			builder.CreateSub(endInt, liveBase, "dataStackUsed");
+		builder.CreateStore(
+			builder.CreateTrunc(used, builder.getInt32Ty()),
+			dataStackOffsetSlot);
+		if (dataStackSnapshotDstSlot) {
+			auto *dst = builder.CreateLoad(builder.getPtrTy(),
+						       dataStackSnapshotDstSlot);
+			auto *src = builder.CreateIntToPtr(liveBase,
+							   builder.getPtrTy());
+			builder.CreateMemCpy(dst, MaybeAlign(1), src,
+					     MaybeAlign(1), used);
+		}
+		// --- call stack ---
+		auto *count =
+			builder.CreateLoad(builder.getInt64Ty(), callItemCnt);
+		if (callStackSizeSlot)
+			builder.CreateStore(
+				builder.CreateTrunc(count,
+						    builder.getInt16Ty()),
+				callStackSizeSlot);
+		if (callStackSnapshotDstSlot) {
+			auto *dst = builder.CreateLoad(builder.getPtrTy(),
+						       callStackSnapshotDstSlot);
+			auto *bytes = builder.CreateMul(
+				count,
+				builder.getInt64(sizeof(void *)),
+				"callStackBytes");
+			builder.CreateMemCpy(dst, MaybeAlign(alignof(void *)),
+					     callStack,
+					     MaybeAlign(alignof(void *)), bytes);
+		}
 	};
 	// If `pc` is listed in `instInfo`, snapshot the registers marked
 	// modified in its CompInfo. Must be called with the builder's
@@ -443,11 +515,12 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			return;
 		emitRegisterSnapshot(it->second);
 		emitFPUSnapshot(it->second);
-		// ExecState currently exposes a single memory buffer, so the
-		// data stack and the heap share one snapshot: take it if the
-		// component writes either.
-		if (it->second.usedHeap() || it->second.usedStack())
-			emitMemSnapshot();
+		// Heap and stacks are tracked separately, so a component that
+		// only touches one doesn't pay for copying the other.
+		if (it->second.usedHeap())
+			emitHeapSnapshot();
+		if (it->second.usedStack())
+			emitStackSnapshot();
 	};
 	for (uint16_t pc = 0; pc < insts.size(); pc++) {
 		auto inst = insts[pc];

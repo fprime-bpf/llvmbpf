@@ -51,8 +51,7 @@ class llvm_bpf_jit_context {
 		       const std::string &func_name = "bpf_main",
 		       bool is_gpu = false,
 		       const std::unordered_map<uint16_t, CompInfo> *instInfo = nullptr,
-		       uintptr_t register_state_store_addr = 0,
-		       uintptr_t mem_snapshot_dst_addr = 0);
+		       uintptr_t register_state_store_addr = 0);
 	std::vector<uint8_t>
 	do_aot_compile(const std::vector<std::string> &extFuncNames,
 		       const std::vector<std::string> &lddwHelpers,
@@ -68,8 +67,7 @@ class llvm_bpf_jit_context {
 	llvm::Error
 	do_jit_compile_with_ss(uint8_t maxFuncNestDepth, uint16_t frameSize,
 			       uintptr_t register_state_store_addr,
-			       const std::unordered_map<uint16_t, CompInfo> &instInfo,
-			       uintptr_t mem_snapshot_dst_addr);
+			       const std::unordered_map<uint16_t, CompInfo> &instInfo);
 	llvm_bpf_jit_context(llvmbpf_vm &vm);
 	virtual ~llvm_bpf_jit_context();
 	precompiled_ebpf_function get_entry_address();

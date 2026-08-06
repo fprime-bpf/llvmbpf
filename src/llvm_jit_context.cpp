@@ -302,8 +302,7 @@ llvm::Error llvm_bpf_jit_context::do_jit_compile(uint8_t maxFuncNestDepth,
 llvm::Error llvm_bpf_jit_context::do_jit_compile_with_ss(
 	uint8_t maxFuncNestDepth, uint16_t frameSize,
 	uintptr_t register_state_store_addr,
-	const std::unordered_map<uint16_t, CompInfo> &instInfo,
-	uintptr_t mem_snapshot_dst_addr)
+	const std::unordered_map<uint16_t, CompInfo> &instInfo)
 {
 	spin_lock_guard guard(compiling.get());
 	auto [jit, extFuncNames, definedLddwHelpers] =
@@ -316,7 +315,7 @@ llvm::Error llvm_bpf_jit_context::do_jit_compile_with_ss(
 	auto bpfModuleOrErr = generateModule(
 		maxFuncNestDepth, frameSize, extFuncNames, definedLddwHelpers,
 		true, true, "bpf_main", false, &instInfo,
-		register_state_store_addr, mem_snapshot_dst_addr);
+		register_state_store_addr);
 	if (!bpfModuleOrErr) {
 		return bpfModuleOrErr.takeError();
 	}
