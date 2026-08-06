@@ -400,6 +400,9 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	IRBuilder<> builder(currBB);
 	// Emits stores of the given normal (r0-r9) registers into the
 	// snapshot buffer at the builder's current insert point.
+	// CompInfo also tracks r10 (and with it the call stack), but
+	// ExecState::normRegs only has room for r0-r9, so r10 is not
+	// snapshotted yet.
 	auto emitRegisterSnapshot = [&](const CompInfo &info) {
 		if (!registerStateStoreBase)
 			return;
@@ -452,7 +455,10 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			return;
 		emitRegisterSnapshot(it->second);
 		emitFPUSnapshot(it->second);
-		if (!it->second.regOnly())
+		// ExecState currently exposes a single memory buffer, so the
+		// data stack and the heap share one snapshot: take it if the
+		// component writes either.
+		if (it->second.usedHeap() || it->second.usedStack())
 			emitMemSnapshot();
 	};
 	for (uint16_t pc = 0; pc < insts.size(); pc++) {

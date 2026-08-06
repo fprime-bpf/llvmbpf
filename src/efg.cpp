@@ -40,6 +40,41 @@ bool isLocalCall(const ebpf_inst &inst)
 	return isCall(inst) && inst.src == 0x1;
 }
 
+// LDDW is the only 16-byte eBPF instruction: it occupies two consecutive
+// slots, the second of which holds the upper 32 bits of the immediate and is
+// not an instruction at all. Its raw bytes must never be decoded as an
+// opcode, and control flow steps over it.
+bool isLddw(const ebpf_inst &inst)
+{
+	return !duo_is_fpu(inst) && inst.opcode == EBPF_OP_LDDW;
+}
+
+// Marks the slots that are the second half of an LDDW. Indexing this by pc
+// tells whether instructions[pc] is a real instruction or a payload word.
+std::vector<bool> lddwPayloadSlots(const std::vector<ebpf_inst> &instructions)
+{
+	std::vector<bool> payload(instructions.size(), false);
+	for (std::size_t i = 0; i < instructions.size(); ++i) {
+		if (payload[i])
+			continue;
+		if (isLddw(instructions[i]) && i + 1 < instructions.size())
+			payload[i + 1] = true;
+	}
+	return payload;
+}
+
+// Whether `inst` is an atomic (STX with the atomic mode) that also writes a
+// register. Plain atomic add/or/and/xor only touch memory, but the fetching
+// variants additionally deliver the old value into a register: XCHG and the
+// _FETCH forms write `src`, while CMPXCHG writes r0.
+bool isAtomic(const ebpf_inst &inst)
+{
+	if (duo_is_fpu(inst))
+		return false;
+	return (inst.opcode & EBPF_CLS_MASK) == EBPF_CLS_STX &&
+	       (inst.opcode & EBPF_MODE_ATOMIC) == EBPF_MODE_ATOMIC;
+}
+
 // Whether `inst` is a conditional jump (integer or FPU). JA/CALL/EXIT are
 // excluded even though they share the JMP/JMP32 instruction classes.
 bool isCondJump(const ebpf_inst &inst)
@@ -65,26 +100,120 @@ uint16_t callTarget(uint16_t pc, const ebpf_inst &inst)
 	return static_cast<uint16_t>(pc + 1 + inst.imm);
 }
 
-// Whether `inst` accesses memory (type M). Everything else is register-only
-// (type R). LD/LDX/ST/STX (including atomics and the second slot of LDDW)
-// and FPU FLDX/FST/FSTX always touch memory. A CALL to an external function
-// touches memory unless it's listed in `regOnlyExtFuncs`; local calls and
-// EXIT are pure control flow and don't access memory themselves (the
-// instructions they jump to are classified independently).
-bool isMemInst(const ebpf_inst &inst,
-	       const std::unordered_set<int32_t> &regOnlyExtFuncs)
+// What memory an instruction writes to. These are the S and H of
+// `type(v)\subseteq{R,S,H}`: a store whose base register can't be resolved
+// sets both.
+struct MemWrite {
+	bool stack = false;
+	bool heap = false;
+};
+
+// Whether `inst` writes to memory through a base register, and if so which
+// register holds the base address. Only *writes* matter here: the snapshot
+// records modified state, so loads (LDX/FLDX/LDDW) read memory but don't
+// dirty it.
+//
+// ST/STX (including atomics) store to `dst + offset`; FPU FST/FSTX likewise
+// store to `dst + offset`.
+bool isMemStore(const ebpf_inst &inst, uint8_t &baseReg)
 {
 	if (duo_is_fpu(inst)) {
 		const auto cls = duo_class(inst);
-		return cls == FLDX || cls == FST || cls == FSTX;
+		if (cls == FST || cls == FSTX) {
+			baseReg = inst.dst;
+			return true;
+		}
+		return false;
 	}
 
-	if (isCall(inst) && !isLocalCall(inst))
-		return regOnlyExtFuncs.find(inst.imm) == regOnlyExtFuncs.end();
-
 	const auto cls = inst.opcode & EBPF_CLS_MASK;
-	return cls == EBPF_CLS_LD || cls == EBPF_CLS_LDX ||
-	       cls == EBPF_CLS_ST || cls == EBPF_CLS_STX;
+	if (cls == EBPF_CLS_ST || cls == EBPF_CLS_STX) {
+		baseReg = inst.dst;
+		return true;
+	}
+	return false;
+}
+
+// Syntactic classification of a store's base register into data stack / heap.
+//
+// r10 is the data stack pointer, so a store based on it writes the data
+// stack only. The heap base pointer is handed to the program as the initial
+// value of r1, so a store based on r1 writes the heap only -- but only while
+// r1 still holds that initial value; if the program ever writes r1 the
+// association is lost and we must fall back to the conservative answer.
+// Anything else is unresolved: assume it writes both.
+MemWrite classifyBase(uint8_t baseReg, bool r1HoldsHeapBase)
+{
+	if (baseReg == 10)
+		return MemWrite{ true, false };
+	if (baseReg == 1 && r1HoldsHeapBase)
+		return MemWrite{ false, true };
+	return MemWrite{ true, true };
+}
+
+// Which memory regions `inst` writes to.
+//
+// A call to an external function never touches the call stack, the data
+// stack or r10 (see "../src/compiler.cpp": emitExtFuncCall only reads r1-r5
+// and stores the result into r0). It is assumed to write the heap unless
+// it's listed in `regOnlyExtFuncs`. Local calls and EXIT move r10 and the
+// call stack but write neither data stack nor heap contents; that r10
+// change is recorded by markModified() instead.
+MemWrite memWriteOf(const ebpf_inst &inst, bool r1HoldsHeapBase,
+		    const std::unordered_set<int32_t> &regOnlyExtFuncs)
+{
+	if (!duo_is_fpu(inst) && isCall(inst) && !isLocalCall(inst)) {
+		const bool regOnly = regOnlyExtFuncs.find(inst.imm) !=
+				     regOnlyExtFuncs.end();
+		return MemWrite{ false, !regOnly };
+	}
+
+	uint8_t baseReg = 0;
+	if (!isMemStore(inst, baseReg))
+		return MemWrite{};
+	return classifyBase(baseReg, r1HoldsHeapBase);
+}
+
+// Whether r1 still holds the heap base pointer it was given at program
+// entry. This is a whole-program check on purpose: the syntactic
+// classification has no dataflow, so a single write to r1 anywhere
+// invalidates the `r1 => heap` assumption everywhere.
+bool r1KeepsHeapBase(const std::vector<ebpf_inst> &instructions)
+{
+	const std::vector<bool> payload = lddwPayloadSlots(instructions);
+	for (std::size_t i = 0; i < instructions.size(); ++i) {
+		if (payload[i])
+			continue; // upper half of an LDDW, not an instruction
+		const ebpf_inst &inst = instructions[i];
+		if (duo_is_fpu(inst)) {
+			// FPU instructions write FPU registers, never r1.
+			continue;
+		}
+
+		// An external call clobbers r0 only, so it leaves r1 alone.
+		if (isCall(inst) || isExit(inst) || isJmpClass(inst))
+			continue;
+
+		// A fetching atomic delivers the old value into `src`; CMPXCHG
+		// writes r0 and XCHG writes no register (see markModified).
+		// Otherwise stores write memory, not `dst`.
+		if (isAtomic(inst)) {
+			if ((inst.imm & EBPF_ATOMIC_OP_FETCH) &&
+			    inst.imm != EBPF_ATOMIC_OP_CMPXCHG &&
+			    inst.imm != EBPF_ATOMIC_OP_XCHG && inst.src == 1)
+				return false;
+			continue;
+		}
+
+		const auto cls = inst.opcode & EBPF_CLS_MASK;
+		if (cls == EBPF_CLS_ST || cls == EBPF_CLS_STX)
+			continue; // stores write memory, not `dst`
+
+		// ALU/ALU64/LD(LDDW)/LDX all write `dst`.
+		if (inst.dst == 1)
+			return false;
+	}
+	return true;
 }
 
 // An edge of G with its direction preserved (a = src, b = dst), used by
@@ -93,38 +222,82 @@ struct UEdge {
 	uint16_t a, b;
 };
 
-// Marks the register (if any) that `inst` writes to in `info`. Calls to
-// external functions are treated as only modifying r0; local calls, EXIT,
-// stores (ST/STX/FST/FSTX) and conditional jumps write no register.
-void markModifiedReg(const ebpf_inst &inst,
-		      const std::unordered_set<int32_t> &regOnlyExtFuncs,
-		      CompInfo &info)
+// Bit layout of CompInfo::modified: r0-r10, then fpu0-fpu10, then the two
+// memory flags.
+constexpr std::size_t NORM_REG_BASE = 0;
+constexpr std::size_t FPU_REG_BASE = NORM_REG_BASE + 11;
+constexpr std::size_t USED_HEAP_BIT = FPU_REG_BASE + 11;
+constexpr std::size_t USED_STACK_BIT = USED_HEAP_BIT + 1;
+
+// Marks the registers (if any) that `inst` writes to in `info`.
+//
+// Calls to external functions only set r0. Calls to and exits from local
+// functions move the data stack pointer (r10 -= / += STACK_SIZE, see
+// "../src/compiler.cpp") and push/pop the call stack, so both are recorded
+// as modifying r10 -- per efg.hpp, a change to r10 also means the call
+// stack changed. A local function's EXIT additionally restores the
+// callee-saved registers r6-r9 from the call stack.
+//
+// Stores (ST/STX/FST/FSTX) and conditional jumps write no register.
+void markModified(const ebpf_inst &inst,
+		  const std::unordered_set<int32_t> &regOnlyExtFuncs,
+		  CompInfo &info)
 {
 	if (duo_is_fpu(inst)) {
 		const auto cls = duo_class(inst);
 		if (cls == FALU || cls == FLDX) {
 			if (inst.dst <= 10)
-				info.modified[inst.dst + 10] = true;
+				info.modified[FPU_REG_BASE + inst.dst] = true;
 		}
 		return;
 	}
 
+	if (isExit(inst)) {
+		// Returning from a local function pops the call stack, moves
+		// r10 back up and restores r6-r9. An entry-function EXIT just
+		// ends the program; treating it the same way is harmless
+		// because nothing observes state after it.
+		info.modified[NORM_REG_BASE + 10] = true;
+		for (uint8_t r = 6; r <= 9; r++)
+			info.modified[NORM_REG_BASE + r] = true;
+		return;
+	}
+
 	if (isCall(inst)) {
-		if (!isLocalCall(inst))
-			info.modified[0] = true; // external call: only r0
+		if (isLocalCall(inst))
+			info.modified[NORM_REG_BASE + 10] = true;
+		else
+			info.modified[NORM_REG_BASE + 0] = true;
 		return;
 	}
 
 	if (isJmpClass(inst)) // conditional jumps write no register
 		return;
 
+	// Atomics hand the pre-operation value back in a register, matching
+	// how "../src/compiler.cpp" emits them: CMPXCHG writes r0, while the
+	// _FETCH variants of add/and/or/xor write `src`. XCHG is emitted with
+	// is_fetch=false there, so it writes memory only, as do the plain
+	// (non-fetching) arithmetic atomics.
+	if (isAtomic(inst)) {
+		if (inst.imm == EBPF_ATOMIC_OP_CMPXCHG) {
+			info.modified[NORM_REG_BASE + 0] = true;
+			return;
+		}
+		if (inst.imm == EBPF_ATOMIC_OP_XCHG)
+			return;
+		if ((inst.imm & EBPF_ATOMIC_OP_FETCH) && inst.src <= 10)
+			info.modified[NORM_REG_BASE + inst.src] = true;
+		return;
+	}
+
 	const auto cls = inst.opcode & EBPF_CLS_MASK;
 	if (cls == EBPF_CLS_ST || cls == EBPF_CLS_STX)
 		return;
 
 	// ALU/ALU64/LD(LDDW)/LDX all write `dst`.
-	if (inst.dst < 10)
-		info.modified[inst.dst] = true;
+	if (inst.dst <= 10)
+		info.modified[NORM_REG_BASE + inst.dst] = true;
 }
 
 // Simple union-find over instruction indices, used to compute weakly
@@ -163,8 +336,21 @@ std::unique_ptr<G_t> buildEFG(const std::vector<ebpf_inst> &instructions)
 {
 	const uint16_t n = static_cast<uint16_t>(instructions.size());
 	std::unique_ptr<G_t> G = std::make_unique<G_t>(n);
+	const std::vector<bool> payload = lddwPayloadSlots(instructions);
+
+	// Index of the instruction following the one at `pc`, stepping over
+	// the payload slot of an LDDW.
+	auto nextPc = [&](uint16_t pc) {
+		uint16_t next = static_cast<uint16_t>(pc + 1);
+		if (next < n && payload[next])
+			++next;
+		return next;
+	};
 
 	for (uint16_t i = 0; i < n; ++i) {
+		if (payload[i])
+			continue; // upper half of an LDDW: not an instruction
+
 		const ebpf_inst &cur = instructions[i];
 
 		if (isExit(cur)) {
@@ -179,18 +365,18 @@ std::unique_ptr<G_t> buildEFG(const std::vector<ebpf_inst> &instructions)
 		} else if (isCall(cur)) {
 			// External function call: falls through to the next
 			// instruction once the helper returns.
-			G[i].push_back(Edge{ static_cast<uint16_t>(i + 1), Exit });
+			G[i].push_back(Edge{ nextPc(i), Exit });
 		} else if (isCondJump(cur)) {
 			G[i].push_back(Edge{ jumpTarget(i, cur), Cond1 });
-			G[i].push_back(Edge{ static_cast<uint16_t>(i + 1), Cond0 });
+			G[i].push_back(Edge{ nextPc(i), Cond0 });
 		} else if (isJa(cur)) {
 			G[i].push_back(Edge{ jumpTarget(i, cur), Uncond });
 		} else {
-			// Everything else (ALU, LD/LDX/ST/STX, atomics, the
-			// second slot of LDDW, FPU ALU/LD/ST, ...) simply
-			// falls through.
-			if (i + 1 < n)
-				G[i].push_back(Edge{ static_cast<uint16_t>(i + 1), Normal });
+			// Everything else (ALU, LD/LDX/ST/STX, atomics, FPU
+			// ALU/LD/ST, ...) simply falls through. For an LDDW,
+			// nextPc() steps over its payload slot.
+			if (nextPc(i) < n)
+				G[i].push_back(Edge{ nextPc(i), Normal });
 		}
 	}
 
@@ -228,8 +414,7 @@ std::unique_ptr<G_t> buildEFG(const std::vector<ebpf_inst> &instructions)
 
 			if (isLocalCall(cur)) {
 				auto nextCallStack = callStack;
-				nextCallStack.push_back(
-					static_cast<uint16_t>(pc + 1));
+				nextCallStack.push_back(nextPc(pc));
 				stack.push_back({ callTarget(pc, cur),
 						   std::move(nextCallStack) });
 				continue;
@@ -246,10 +431,21 @@ std::unique_ptr<G_t> buildEFG(const std::vector<ebpf_inst> &instructions)
 namespace
 {
 
-// Computes the size of every weakly connected component reachable through
-// edges not in `cut`, and returns the size of the largest one.
-uint16_t largestComponentSize(uint16_t n, const std::vector<UEdge> &edges,
-			      const std::unordered_set<std::size_t> &cutEdgeIdx)
+// Result of evaluating a candidate cut set: the two quantities the spec's
+// optimization goals are expressed in terms of.
+struct CutQuality {
+	uint16_t largest = 0; // |v(P_m)|, the constraint being satisfied
+	uint16_t memFree = 0; // sum of memFree(w) over components, goal 2
+};
+
+// Builds the weak components of `P=(G,E-cut)` and measures them.
+//
+// `payload` marks LDDW upper-half slots; they are not instructions, so they
+// neither count toward a component's size nor make it non-memory-free.
+CutQuality evaluateCut(uint16_t n, const std::vector<UEdge> &edges,
+		       const std::unordered_set<std::size_t> &cutEdgeIdx,
+		       const std::vector<bool> &payload,
+		       const std::vector<bool> &touchesMem)
 {
 	UnionFind uf(n);
 	for (std::size_t i = 0; i < edges.size(); ++i) {
@@ -258,12 +454,22 @@ uint16_t largestComponentSize(uint16_t n, const std::vector<UEdge> &edges,
 		uf.unite(edges[i].a, edges[i].b);
 	}
 	std::unordered_map<uint16_t, uint16_t> size;
-	uint16_t best = 0;
+	std::unordered_map<uint16_t, bool> dirty;
 	for (uint16_t i = 0; i < n; ++i) {
-		uint16_t s = ++size[uf.find(i)];
-		best = std::max(best, s);
+		if (payload[i])
+			continue;
+		uint16_t root = uf.find(i);
+		++size[root];
+		if (touchesMem[i])
+			dirty[root] = true;
 	}
-	return best;
+	CutQuality q;
+	for (const auto &[root, s] : size) {
+		q.largest = std::max(q.largest, s);
+		if (!dirty[root])
+			++q.memFree;
+	}
+	return q;
 }
 
 } // namespace
@@ -289,9 +495,19 @@ partition(const G_t G, const std::vector<ebpf_inst> &instructions,
 		}
 	}
 
-	std::vector<bool> isMem(n);
-	for (uint16_t i = 0; i < n; ++i)
-		isMem[i] = isMemInst(instructions[i], regOnlyExtFuncs);
+	// Per-instruction memory-write classification (the S/H of type(v)).
+	// An LDDW's payload slot is not an instruction, so it writes nothing.
+	const bool r1HoldsHeapBase = r1KeepsHeapBase(instructions);
+	const std::vector<bool> payload = lddwPayloadSlots(instructions);
+	std::vector<MemWrite> memWrite(n);
+	std::vector<bool> touchesMem(n);
+	for (uint16_t i = 0; i < n; ++i) {
+		if (payload[i])
+			continue;
+		memWrite[i] = memWriteOf(instructions[i], r1HoldsHeapBase,
+					 regOnlyExtFuncs);
+		touchesMem[i] = memWrite[i].stack || memWrite[i].heap;
+	}
 
 	// end(e) per the useSrc parameter.
 	auto endOf = [&](const UEdge &e) { return useSrc ? e.a : e.b; };
@@ -305,47 +521,51 @@ partition(const G_t G, const std::vector<ebpf_inst> &instructions,
 	for (std::size_t i = 0; i < edges.size(); ++i)
 		byEnd[endOf(edges[i])].push_back(i);
 
-	// Greedily grow E_1 (E_2 here, since we don't try to strictly
-	// minimize beyond this heuristic): repeatedly cut the single
-	// end(e)-group that reduces the largest remaining weakly connected
-	// component the most, until every component is within maxSize.
-	// Goal 1 (minimize |B|) is primary: each round adds exactly one
-	// node to B regardless of how many edges that node's group
-	// contains, so this never spends more than one B-entry per
-	// meaningful reduction in the oversized component. Goal 2 (regOnly
-	// grouping) only breaks ties among end-groups that reduce the
-	// largest component by the same amount, preferring the one that
-	// separates the most memory/register-only boundary.
+	// Greedily grow the cut set until the size constraint holds. Each
+	// round commits exactly one whole end(e)-group, so |B| equals the
+	// number of rounds: spending as few rounds as possible *is* goal 1
+	// (minimize |B|), and it is served by preferring, at every step, the
+	// group that shrinks the largest component the most -- the fewest
+	// such steps get under maxSize.
+	//
+	// Goal 2 (maximize the number of memory-free components) is strictly
+	// subordinate, so it only ever breaks ties between candidates whose
+	// resulting largest component is equal, i.e. between candidates that
+	// are indistinguishable for goal 1. Among those we take the cut
+	// yielding the most components that write neither the data stack nor
+	// the heap; memFree is measured on the whole trial partition rather
+	// than counting edge endpoints, so it matches the spec's definition
+	// directly.
+	//
+	// This is a heuristic: the exact problem is NP, and the header only
+	// asks for a good-enough E_2 satisfying the constraint.
 	std::unordered_set<std::size_t> cutEdgeIdx;
 	std::unordered_set<uint16_t> cutEnds;
 
-	while (largestComponentSize(n, edges, cutEdgeIdx) > maxSize) {
+	while (evaluateCut(n, edges, cutEdgeIdx, payload, touchesMem).largest >
+	       maxSize) {
 		uint16_t bestEnd = UINT16_MAX;
-		uint16_t bestResultingMax = UINT16_MAX;
-		int bestTypeBoundaryScore = -1;
+		CutQuality best{ UINT16_MAX, 0 };
 
 		for (const auto &[end, idxs] : byEnd) {
 			if (cutEnds.count(end))
 				continue; // already cut, no further benefit
 
 			std::unordered_set<std::size_t> trial = cutEdgeIdx;
-			int typeBoundaryScore = 0;
-			for (std::size_t idx : idxs) {
+			for (std::size_t idx : idxs)
 				trial.insert(idx);
-				const UEdge &e = edges[idx];
-				if (isMem[e.a] != isMem[e.b])
-					++typeBoundaryScore;
-			}
 
-			uint16_t resultingMax =
-				largestComponentSize(n, edges, trial);
+			const CutQuality q = evaluateCut(n, edges, trial,
+							 payload, touchesMem);
 
-			if (resultingMax < bestResultingMax ||
-			    (resultingMax == bestResultingMax &&
-			     typeBoundaryScore > bestTypeBoundaryScore)) {
+			// Goal 1 first (a smaller largest component reaches
+			// the constraint in fewer rounds, i.e. a smaller |B|),
+			// then goal 2 as the tie-break.
+			if (q.largest < best.largest ||
+			    (q.largest == best.largest &&
+			     q.memFree > best.memFree)) {
 				bestEnd = end;
-				bestResultingMax = resultingMax;
-				bestTypeBoundaryScore = typeBoundaryScore;
+				best = q;
 			}
 		}
 
@@ -360,29 +580,29 @@ partition(const G_t G, const std::vector<ebpf_inst> &instructions,
 	if (cutEdgeIdx.empty())
 		return B;
 
-	// Determine each remaining group's regOnly status and modified-register
-	// set from the final (post-cut) weak components.
+	// Determine each remaining group's modified-register set and its
+	// usedHeap/usedStack flags from the final (post-cut) weak components.
+	// Both flags are unions over the component: a component uses the heap
+	// iff any of its instructions writes the heap, and likewise for the
+	// data stack.
 	UnionFind uf(n);
 	for (std::size_t i = 0; i < edges.size(); ++i) {
 		if (!cutEdgeIdx.count(i))
 			uf.unite(edges[i].a, edges[i].b);
 	}
 	std::unordered_map<uint16_t, CompInfo> compInfo;
-	std::unordered_map<uint16_t, bool> compRegOnly;
 	for (uint16_t i = 0; i < n; ++i) {
+		if (payload[i])
+			continue; // upper half of an LDDW: not an instruction
 		uint16_t root = uf.find(i);
+		CompInfo &info = compInfo[root];
 
-		auto it = compRegOnly.find(root);
-		if (it == compRegOnly.end())
-			compRegOnly[root] = !isMem[i];
-		else if (isMem[i])
-			it->second = false;
-
-		markModifiedReg(instructions[i], regOnlyExtFuncs,
-				 compInfo[root]);
+		markModified(instructions[i], regOnlyExtFuncs, info);
+		if (memWrite[i].heap)
+			info.modified[USED_HEAP_BIT] = true;
+		if (memWrite[i].stack)
+			info.modified[USED_STACK_BIT] = true;
 	}
-	for (auto &[root, regOnly] : compRegOnly)
-		compInfo[root].modified[21] = regOnly;
 
 	for (std::size_t idx : cutEdgeIdx) {
 		uint16_t end = endOf(edges[idx]);
@@ -393,12 +613,15 @@ partition(const G_t G, const std::vector<ebpf_inst> &instructions,
 }
 bool CompInfo::fpuRegModified(uint8_t i)const{
 	assert(i<=10);
-	return modified[i+10];
+	return modified[FPU_REG_BASE+i];
 }
 bool CompInfo::normRegModified(uint8_t i)const{
-	assert(i<10);
-	return modified[i];
+	assert(i<=10);//r0-r10; r10 also implies the call stack changed
+	return modified[NORM_REG_BASE+i];
 }
-bool CompInfo::regOnly()const noexcept{
-	return modified[21];//last index
+bool CompInfo::usedHeap()const noexcept{
+	return modified[USED_HEAP_BIT];
+}
+bool CompInfo::usedStack()const noexcept{
+	return modified[USED_STACK_BIT];
 }

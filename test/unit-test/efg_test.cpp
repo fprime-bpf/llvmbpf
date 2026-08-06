@@ -1,6 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <efg.hpp>
+#include <fpu_inst.h>
+
+#include <algorithm>
 
 namespace
 {
@@ -178,11 +181,13 @@ TEST_CASE("partition: long straight-line chain gets cut to respect maxSize")
 	// Some cuts must have happened since the chain (10 nodes) exceeds
 	// maxSize=3.
 	REQUIRE_FALSE(B.empty());
-	// All nodes here are register-only (pure ALU + EXIT), so every
-	// reported boundary node must be marked as living in a regOnly
-	// group.
-	for (const auto &[node, info] : B)
-		REQUIRE(info.regOnly());
+	// All nodes here write no memory (pure ALU + EXIT), so every
+	// reported boundary node must live in a component that touches
+	// neither the data stack nor the heap.
+	for (const auto &[node, info] : B) {
+		REQUIRE_FALSE(info.usedHeap());
+		REQUIRE_FALSE(info.usedStack());
+	}
 }
 
 TEST_CASE("partition: reports which registers a group modifies")
@@ -200,9 +205,11 @@ TEST_CASE("partition: reports which registers a group modifies")
 
 	REQUIRE_FALSE(B.empty());
 	for (const auto &[node, info] : B) {
-		REQUIRE(info.regOnly());
-		// Every group here only ever writes r1 and/or r2.
-		for (uint8_t r = 0; r < 10; ++r) {
+		REQUIRE_FALSE(info.usedHeap());
+		REQUIRE_FALSE(info.usedStack());
+		// Every group here only ever writes r1 and/or r2, apart from
+		// the callee-saved r6-r9 and r10 that EXIT restores.
+		for (uint8_t r = 0; r < 6; ++r) {
 			if (r == 1 || r == 2)
 				continue;
 			REQUIRE_FALSE(info.normRegModified(r));
@@ -237,33 +244,141 @@ TEST_CASE("partition: external call is treated as modifying only r0")
 	(void)sawCallGroupBoundary;
 }
 
-TEST_CASE("partition: memory access marks its group as not regOnly")
+// Builds a chain of `pad` register-only instructions, then `mid`, then
+// another `pad` register-only instructions and an EXIT. `mid` lands at
+// index `pad`.
+std::vector<ebpf_inst> chainAround(const ebpf_inst &mid, int pad = 4)
 {
 	std::vector<ebpf_inst> instructions;
-	for (int i = 0; i < 4; ++i)
+	for (int i = 0; i < pad; ++i)
 		instructions.push_back(
 			makeInst(EBPF_OP_MOV64_IMM, 1, 0, 0, i));
-	// LDXDW touches memory.
-	instructions.push_back(makeInst(EBPF_OP_LDXDW, 2, 10, -8, 0));
-	for (int i = 0; i < 4; ++i)
+	instructions.push_back(mid);
+	for (int i = 0; i < pad; ++i)
 		instructions.push_back(
 			makeInst(EBPF_OP_MOV64_IMM, 3, 0, 0, i));
 	instructions.push_back(makeInst(EBPF_OP_EXIT));
+	return instructions;
+}
+
+TEST_CASE("partition: a store based on r10 marks its group as using the data stack")
+{
+	// STXDW [r10-8] = r2: writes the data stack only.
+	const auto instructions =
+		chainAround(makeInst(EBPF_OP_STXDW, 10, 2, -8, 0));
 
 	const auto g = buildEFG(instructions);
 	const auto B = partition(g.get(), instructions, 3, true, {});
 
 	REQUIRE_FALSE(B.empty());
-	// The group containing the LDXDW instruction (index 4) must be
-	// reported as not regOnly wherever it shows up as a boundary node.
-	bool sawMemGroupBoundary = false;
 	for (const auto &[node, info] : B) {
 		if (node == 4) {
-			sawMemGroupBoundary = true;
-			REQUIRE_FALSE(info.regOnly());
+			REQUIRE(info.usedStack());
+			REQUIRE_FALSE(info.usedHeap());
 		}
 	}
-	(void)sawMemGroupBoundary;
+}
+
+TEST_CASE("partition: a store based on an untouched r1 marks its group as using the heap")
+{
+	// STXDW [r1+0] = r2. r1 is never written in this program, so it
+	// still holds the heap base pointer given at entry.
+	const auto instructions =
+		chainAround(makeInst(EBPF_OP_STXDW, 1, 2, 0, 0), 0);
+
+	const auto g = buildEFG(instructions);
+	const auto B = partition(g.get(), instructions, 1, true, {});
+
+	REQUIRE_FALSE(B.empty());
+	for (const auto &[node, info] : B) {
+		if (node == 0) {
+			REQUIRE(info.usedHeap());
+			REQUIRE_FALSE(info.usedStack());
+		}
+	}
+}
+
+TEST_CASE("partition: a store on an unresolved base is assumed to touch both")
+{
+	// STXDW [r3+0] = r2: r3's provenance is unknown, so the store is
+	// assumed to write both the data stack and the heap.
+	const auto instructions =
+		chainAround(makeInst(EBPF_OP_STXDW, 3, 2, 0, 0));
+
+	const auto g = buildEFG(instructions);
+	const auto B = partition(g.get(), instructions, 3, true, {});
+
+	REQUIRE_FALSE(B.empty());
+	for (const auto &[node, info] : B) {
+		if (node == 4) {
+			REQUIRE(info.usedStack());
+			REQUIRE(info.usedHeap());
+		}
+	}
+}
+
+TEST_CASE("partition: writing r1 invalidates the r1-is-heap-base assumption")
+{
+	// r1 is reassigned before the store, so [r1+0] can no longer be
+	// assumed to be the heap and must be treated conservatively.
+	std::vector<ebpf_inst> instructions{
+		makeInst(EBPF_OP_MOV64_IMM, 1, 0, 0, 0),
+		makeInst(EBPF_OP_STXDW, 1, 2, 0, 0),
+		makeInst(EBPF_OP_EXIT),
+	};
+
+	const auto g = buildEFG(instructions);
+	const auto B = partition(g.get(), instructions, 1, true, {});
+
+	REQUIRE_FALSE(B.empty());
+	for (const auto &[node, info] : B) {
+		if (node == 1) {
+			REQUIRE(info.usedStack());
+			REQUIRE(info.usedHeap());
+		}
+	}
+}
+
+TEST_CASE("partition: a load dirties no memory")
+{
+	// LDXDW r2 = [r10-8] reads the data stack but writes only r2, so
+	// its component stays memory-free.
+	const auto instructions =
+		chainAround(makeInst(EBPF_OP_LDXDW, 2, 10, -8, 0));
+
+	const auto g = buildEFG(instructions);
+	const auto B = partition(g.get(), instructions, 3, true, {});
+
+	REQUIRE_FALSE(B.empty());
+	for (const auto &[node, info] : B) {
+		REQUIRE_FALSE(info.usedHeap());
+		REQUIRE_FALSE(info.usedStack());
+	}
+}
+
+TEST_CASE("partition: local call and exit are reported as modifying r10")
+{
+	std::vector<ebpf_inst> instructions{
+		makeInst(EBPF_OP_MOV64_IMM, 1, 0, 0, 1),
+		makeInst(EBPF_OP_CALL, 0, 1, 0, 2), // local call to pc=4
+		makeInst(EBPF_OP_MOV64_REG, 2, 0),
+		makeInst(EBPF_OP_EXIT),
+		makeInst(EBPF_OP_MOV64_REG, 0, 1),
+		makeInst(EBPF_OP_EXIT),
+	};
+
+	const auto g = buildEFG(instructions);
+	const auto B = partition(g.get(), instructions, 2, true, {});
+
+	REQUIRE_FALSE(B.empty());
+	// Every component here contains a local call or an EXIT, both of
+	// which move r10 (and with it the call stack).
+	bool sawR10 = false;
+	for (const auto &[node, info] : B) {
+		if (info.normRegModified(10))
+			sawR10 = true;
+	}
+	REQUIRE(sawR10);
 }
 
 TEST_CASE("partition: external call in regOnlyExtFuncs is treated as register-only")
@@ -317,7 +432,232 @@ TEST_CASE("partition: cuts concentrate on a shared convergence node to minimize 
 	REQUIRE(B.count(9) == 1);
 }
 
-TEST_CASE("partition: external call not in regOnlyExtFuncs is memory-accessing")
+TEST_CASE("EFG: LDDW occupies two slots and control flow steps over the payload")
+{
+	// LDDW r1, imm64 is 16 bytes: index 1 holds the upper half of the
+	// immediate and is not an instruction, so index 0 falls through
+	// straight to index 2.
+	std::vector<ebpf_inst> instructions{
+		makeInst(EBPF_OP_LDDW, 1, 0, 0, 0x1234),
+		makeInst(0, 0, 0, 0, 0x5678), // payload slot, not an instruction
+		makeInst(EBPF_OP_MOV64_IMM, 2, 0, 0, 1),
+		makeInst(EBPF_OP_EXIT),
+	};
+
+	const auto g = buildEFG(instructions);
+
+	REQUIRE(edgeCount(g, 0) == 1);
+	REQUIRE(hasEdge(g, 0, 2, Normal)); // steps over slot 1
+	// The payload slot itself is not an instruction: no outgoing edge.
+	REQUIRE(edgeCount(g, 1) == 0);
+	REQUIRE(hasEdge(g, 2, 3, Normal));
+}
+
+TEST_CASE("EFG: a jump landing after an LDDW is unaffected by the payload slot")
+{
+	// JA over the LDDW: target is index 3, computed the usual way. The
+	// LDDW at 1..2 must not shift anything.
+	std::vector<ebpf_inst> instructions{
+		makeInst(EBPF_OP_JA, 0, 0, 2, 0), // -> pc 0+1+2 = 3
+		makeInst(EBPF_OP_LDDW, 1, 0, 0, 0x1234),
+		makeInst(0, 0, 0, 0, 0x5678), // payload
+		makeInst(EBPF_OP_EXIT),
+	};
+
+	const auto g = buildEFG(instructions);
+
+	REQUIRE(edgeCount(g, 0) == 1);
+	REQUIRE(hasEdge(g, 0, 3, Uncond));
+	REQUIRE(edgeCount(g, 2) == 0); // payload has no outgoing edge
+}
+
+TEST_CASE("partition: an LDDW payload slot is not treated as an instruction")
+{
+	// The payload here (0x61 = EBPF_OP_LDXW) would, if decoded as an
+	// opcode, look like a register write to r0. It must be ignored.
+	std::vector<ebpf_inst> instructions{
+		makeInst(EBPF_OP_MOV64_IMM, 1, 0, 0, 1),
+		makeInst(EBPF_OP_LDDW, 2, 0, 0, 0x1234),
+		makeInst(EBPF_OP_LDXW, 0, 0, 0, 0x5678), // payload slot
+		makeInst(EBPF_OP_MOV64_IMM, 3, 0, 0, 1),
+		makeInst(EBPF_OP_EXIT),
+	};
+
+	const auto g = buildEFG(instructions);
+	const auto B = partition(g.get(), instructions, 1, true, {});
+
+	REQUIRE_FALSE(B.empty());
+	// Nothing in this program writes memory, and the payload's stray
+	// "LDXW" must not have been counted as a write to r0 either.
+	for (const auto &[node, info] : B) {
+		REQUIRE_FALSE(info.usedHeap());
+		REQUIRE_FALSE(info.usedStack());
+		REQUIRE_FALSE(info.normRegModified(0));
+	}
+}
+
+TEST_CASE("partition: a plain atomic writes memory but no register")
+{
+	// Non-fetching atomic add to [r10-8]: dirties the data stack only.
+	const auto instructions = chainAround(
+		makeInst(EBPF_OP_ATOMIC_STORE, 10, 2, -8, EBPF_ATOMIC_ADD));
+
+	const auto g = buildEFG(instructions);
+	const auto B = partition(g.get(), instructions, 3, true, {});
+
+	REQUIRE_FALSE(B.empty());
+	for (const auto &[node, info] : B) {
+		if (node == 4) {
+			REQUIRE(info.usedStack());
+			REQUIRE_FALSE(info.usedHeap());
+			// No fetch bit: the source register is not written.
+			REQUIRE_FALSE(info.normRegModified(2));
+		}
+	}
+}
+
+TEST_CASE("partition: a fetching atomic also writes its source register")
+{
+	// A fetching atomic add delivers the previous value back into `src`
+	// (r2 here), so the component must report r2 as modified in addition
+	// to using the stack.
+	const auto instructions =
+		chainAround(makeInst(EBPF_OP_ATOMIC_STORE, 10, 2, -8,
+				     EBPF_ATOMIC_ADD | EBPF_ATOMIC_OP_FETCH));
+
+	const auto g = buildEFG(instructions);
+	const auto B = partition(g.get(), instructions, 3, true, {});
+
+	REQUIRE_FALSE(B.empty());
+	for (const auto &[node, info] : B) {
+		if (node == 4) {
+			REQUIRE(info.usedStack());
+			REQUIRE(info.normRegModified(2));
+		}
+	}
+}
+
+TEST_CASE("partition: XCHG writes memory but no register")
+{
+	// "../src/compiler.cpp" emits XCHG with is_fetch=false, so despite
+	// the _FETCH bit in its encoding it never stores back into `src`.
+	const auto instructions = chainAround(
+		makeInst(EBPF_OP_ATOMIC_STORE, 10, 2, -8, EBPF_ATOMIC_OP_XCHG));
+
+	const auto g = buildEFG(instructions);
+	const auto B = partition(g.get(), instructions, 3, true, {});
+
+	REQUIRE_FALSE(B.empty());
+	for (const auto &[node, info] : B) {
+		if (node == 4) {
+			REQUIRE(info.usedStack());
+			REQUIRE_FALSE(info.normRegModified(2));
+		}
+	}
+}
+
+TEST_CASE("partition: CMPXCHG reports r0 as modified")
+{
+	const auto instructions = chainAround(makeInst(
+		EBPF_OP_ATOMIC_STORE, 10, 2, -8, EBPF_ATOMIC_OP_CMPXCHG));
+
+	const auto g = buildEFG(instructions);
+	const auto B = partition(g.get(), instructions, 3, true, {});
+
+	REQUIRE_FALSE(B.empty());
+	for (const auto &[node, info] : B) {
+		if (node == 4) {
+			REQUIRE(info.usedStack());
+			// CMPXCHG returns the old value in r0, not in `src`.
+			REQUIRE(info.normRegModified(0));
+		}
+	}
+}
+
+TEST_CASE("partition: an FPU write to f1 keeps the r1-is-heap-base assumption")
+{
+	// FMOV writes the *FPU* register f1, which is a different register
+	// file from r1. It must not invalidate the `r1 => heap` mapping, so
+	// the store through r1 still classifies as heap-only.
+	std::vector<ebpf_inst> instructions{
+		makeInst(DUO_OP_FMOV_IMM, 1, 0, 0x02, 0), // offset bit marks FPU
+		makeInst(EBPF_OP_STXDW, 1, 2, 0, 0),
+		makeInst(EBPF_OP_EXIT),
+	};
+
+	const auto g = buildEFG(instructions);
+	const auto B = partition(g.get(), instructions, 1, true, {});
+
+	REQUIRE_FALSE(B.empty());
+	for (const auto &[node, info] : B) {
+		if (node == 1) {
+			REQUIRE(info.usedHeap());
+			REQUIRE_FALSE(info.usedStack());
+		}
+	}
+}
+
+TEST_CASE("partition: goal 2 groups memory writes rather than scattering them")
+{
+	// Two stores sit adjacent in the middle of an otherwise register-only
+	// chain. Cutting so that both stores land in the same component leaves
+	// more memory-free components than splitting them apart, which is what
+	// goal 2 asks for. Whatever cut is chosen, the constraint must hold
+	// and at least one reported component must be memory-free.
+	std::vector<ebpf_inst> instructions;
+	for (int i = 0; i < 4; ++i)
+		instructions.push_back(makeInst(EBPF_OP_MOV64_IMM, 1, 0, 0, i));
+	instructions.push_back(makeInst(EBPF_OP_STXDW, 10, 2, -8, 0));
+	instructions.push_back(makeInst(EBPF_OP_STXDW, 10, 3, -16, 0));
+	for (int i = 0; i < 4; ++i)
+		instructions.push_back(makeInst(EBPF_OP_MOV64_IMM, 4, 0, 0, i));
+	instructions.push_back(makeInst(EBPF_OP_EXIT));
+
+	const auto g = buildEFG(instructions);
+	const auto B = partition(g.get(), instructions, 4, true, {});
+
+	REQUIRE_FALSE(B.empty());
+	bool sawMemFree = false;
+	for (const auto &[node, info] : B) {
+		if (!info.usedHeap() && !info.usedStack())
+			sawMemFree = true;
+	}
+	REQUIRE(sawMemFree);
+}
+
+TEST_CASE("partition: every resulting component respects maxSize")
+{
+	// The constraint is the hard requirement: after the returned cuts,
+	// no weakly connected component may exceed maxSize. Rebuild the
+	// components from B's boundary nodes to confirm the chain really was
+	// broken often enough.
+	std::vector<ebpf_inst> instructions;
+	for (int i = 0; i < 20; ++i)
+		instructions.push_back(makeInst(EBPF_OP_MOV64_IMM, 1, 0, 0, i));
+	instructions.push_back(makeInst(EBPF_OP_EXIT));
+
+	const auto g = buildEFG(instructions);
+	const uint16_t maxSize = 4;
+	const auto B = partition(g.get(), instructions, maxSize, true, {});
+
+	// On a straight-line chain with useSrc=true, each boundary node cuts
+	// the chain right after itself, so the gaps between consecutive
+	// boundary nodes bound the component sizes.
+	std::vector<uint16_t> cuts;
+	for (const auto &[node, info] : B)
+		cuts.push_back(node);
+	std::sort(cuts.begin(), cuts.end());
+
+	REQUIRE_FALSE(cuts.empty());
+	uint16_t prev = 0;
+	for (uint16_t c : cuts) {
+		REQUIRE(static_cast<uint16_t>(c + 1 - prev) <= maxSize);
+		prev = static_cast<uint16_t>(c + 1);
+	}
+	REQUIRE(static_cast<uint16_t>(instructions.size() - prev) <= maxSize);
+}
+
+TEST_CASE("partition: external call not in regOnlyExtFuncs uses the heap")
 {
 	std::vector<ebpf_inst> instructions;
 	for (int i = 0; i < 3; ++i)
@@ -332,12 +672,11 @@ TEST_CASE("partition: external call not in regOnlyExtFuncs is memory-accessing")
 	const auto g = buildEFG(instructions);
 	const auto B = partition(g.get(), instructions, 3, true, {});
 
-	bool sawCallGroupBoundary = false;
 	for (const auto &[node, info] : B) {
 		if (node == 3) {
-			sawCallGroupBoundary = true;
-			REQUIRE_FALSE(info.regOnly());
+			// An external call never touches the data stack.
+			REQUIRE(info.usedHeap());
+			REQUIRE_FALSE(info.usedStack());
 		}
 	}
-	(void)sawCallGroupBoundary;
 }
