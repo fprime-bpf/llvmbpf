@@ -494,6 +494,7 @@ llvm_bpf_jit_context::create_and_initialize_lljit_instance()
 #else
 		jtmb->setCodeGenOptLevel(CodeGenOpt::Aggressive);
 #endif
+		jtmb->setCodeModel(CodeModel::Large);
 		builder.setJITTargetMachineBuilder(*jtmb);
 	} else {
 		SPDLOG_DEBUG(
