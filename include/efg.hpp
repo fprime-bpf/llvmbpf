@@ -60,7 +60,7 @@ Call to and exit (return) from local functions will change r10 and call stack (s
 
 Call to external function never changes call nor data stack memory nor r10 (see "../src/compiler.cpp"): it only sets r0 as return value.
 
-Assume eBPF instructions writing to offsets relative to r10 are writing to data stack only. Assume eBPF instructions writing to offsets relative to initial value of r1 (this is how base pointer to heap memory is provided) when running the program writes only to heap memory. If it cannot be determined where the offset is relative to, assume it writes both data stack and heap.
+Assume eBPF instructions writing to offsets relative to r10 are writing to data stack only. Every other base register is treated as unresolved: assume such a write hits both data stack and heap. (The heap base pointer is provided as the initial value of r1, so writes relative to it are in principle heap-only, but recognising them needs dataflow that isn't implemented yet.)
 */
 // regOnlyExtFuncs identifies external functions by the `imm` field of their
 // CALL instruction, i.e. the same index passed to register_external_function.

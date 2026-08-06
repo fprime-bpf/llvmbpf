@@ -145,7 +145,7 @@ Note: The standalone CLI does not support helpers/maps. For full functionality, 
 - **LLVM Version**:
   - Minimum: LLVM >= 15 for JIT/AOT/PTX
   - SPIR-V: LLVM >= 16 (requires native SPIR-V backend)
-- **eBPF Stack Size**: 512 bytes (`EBPF_STACK_SIZE`)
+- **eBPF Stack Size**: 40000 bytes per call frame (`EBPF_STACK_SIZE`)
 - **Max External Functions**: 8192 (`MAX_EXT_FUNCS`)
 - **No Built-in Maps/Helpers**: The library provides hooks but no implementations
 

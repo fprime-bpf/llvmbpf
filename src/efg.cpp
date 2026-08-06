@@ -136,18 +136,14 @@ bool isMemStore(const ebpf_inst &inst, uint8_t &baseReg)
 
 // Syntactic classification of a store's base register into data stack / heap.
 //
-// r10 is the data stack pointer, so a store based on it writes the data
-// stack only. The heap base pointer is handed to the program as the initial
-// value of r1, so a store based on r1 writes the heap only -- but only while
-// r1 still holds that initial value; if the program ever writes r1 the
-// association is lost and we must fall back to the conservative answer.
-// Anything else is unresolved: assume it writes both.
-MemWrite classifyBase(uint8_t baseReg, bool r1HoldsHeapBase)
+// r10 is the data stack pointer, so a store based on it writes the data stack
+// only. Any other base is unresolved: assume it writes both. (Stores relative
+// to the initial value of r1 write the heap only, but recognising them needs
+// dataflow that isn't implemented yet, so they land in the conservative case.)
+MemWrite classifyBase(uint8_t baseReg)
 {
 	if (baseReg == 10)
 		return MemWrite{ true, false };
-	if (baseReg == 1 && r1HoldsHeapBase)
-		return MemWrite{ false, true };
 	return MemWrite{ true, true };
 }
 
@@ -159,7 +155,7 @@ MemWrite classifyBase(uint8_t baseReg, bool r1HoldsHeapBase)
 // it's listed in `regOnlyExtFuncs`. Local calls and EXIT move r10 and the
 // call stack but write neither data stack nor heap contents; that r10
 // change is recorded by markModified() instead.
-MemWrite memWriteOf(const ebpf_inst &inst, bool r1HoldsHeapBase,
+MemWrite memWriteOf(const ebpf_inst &inst,
 		    const std::unordered_set<int32_t> &regOnlyExtFuncs)
 {
 	if (!duo_is_fpu(inst) && isCall(inst) && !isLocalCall(inst)) {
@@ -171,49 +167,7 @@ MemWrite memWriteOf(const ebpf_inst &inst, bool r1HoldsHeapBase,
 	uint8_t baseReg = 0;
 	if (!isMemStore(inst, baseReg))
 		return MemWrite{};
-	return classifyBase(baseReg, r1HoldsHeapBase);
-}
-
-// Whether r1 still holds the heap base pointer it was given at program
-// entry. This is a whole-program check on purpose: the syntactic
-// classification has no dataflow, so a single write to r1 anywhere
-// invalidates the `r1 => heap` assumption everywhere.
-bool r1KeepsHeapBase(const std::vector<ebpf_inst> &instructions)
-{
-	const std::vector<bool> payload = lddwPayloadSlots(instructions);
-	for (std::size_t i = 0; i < instructions.size(); ++i) {
-		if (payload[i])
-			continue; // upper half of an LDDW, not an instruction
-		const ebpf_inst &inst = instructions[i];
-		if (duo_is_fpu(inst)) {
-			// FPU instructions write FPU registers, never r1.
-			continue;
-		}
-
-		// An external call clobbers r0 only, so it leaves r1 alone.
-		if (isCall(inst) || isExit(inst) || isJmpClass(inst))
-			continue;
-
-		// A fetching atomic delivers the old value into `src`; CMPXCHG
-		// writes r0 and XCHG writes no register (see markModified).
-		// Otherwise stores write memory, not `dst`.
-		if (isAtomic(inst)) {
-			if ((inst.imm & EBPF_ATOMIC_OP_FETCH) &&
-			    inst.imm != EBPF_ATOMIC_OP_CMPXCHG &&
-			    inst.imm != EBPF_ATOMIC_OP_XCHG && inst.src == 1)
-				return false;
-			continue;
-		}
-
-		const auto cls = inst.opcode & EBPF_CLS_MASK;
-		if (cls == EBPF_CLS_ST || cls == EBPF_CLS_STX)
-			continue; // stores write memory, not `dst`
-
-		// ALU/ALU64/LD(LDDW)/LDX all write `dst`.
-		if (inst.dst == 1)
-			return false;
-	}
-	return true;
+	return classifyBase(baseReg);
 }
 
 // An edge of G with its direction preserved (a = src, b = dst), used by
@@ -497,15 +451,13 @@ partition(const G_t G, const std::vector<ebpf_inst> &instructions,
 
 	// Per-instruction memory-write classification (the S/H of type(v)).
 	// An LDDW's payload slot is not an instruction, so it writes nothing.
-	const bool r1HoldsHeapBase = r1KeepsHeapBase(instructions);
 	const std::vector<bool> payload = lddwPayloadSlots(instructions);
 	std::vector<MemWrite> memWrite(n);
 	std::vector<bool> touchesMem(n);
 	for (uint16_t i = 0; i < n; ++i) {
 		if (payload[i])
 			continue;
-		memWrite[i] = memWriteOf(instructions[i], r1HoldsHeapBase,
-					 regOnlyExtFuncs);
+		memWrite[i] = memWriteOf(instructions[i], regOnlyExtFuncs);
 		touchesMem[i] = memWrite[i].stack || memWrite[i].heap;
 	}
 

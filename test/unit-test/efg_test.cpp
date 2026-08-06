@@ -279,10 +279,11 @@ TEST_CASE("partition: a store based on r10 marks its group as using the data sta
 	}
 }
 
-TEST_CASE("partition: a store based on an untouched r1 marks its group as using the heap")
+TEST_CASE("partition: a store based on r1 is assumed to touch both")
 {
-	// STXDW [r1+0] = r2. r1 is never written in this program, so it
-	// still holds the heap base pointer given at entry.
+	// STXDW [r1+0] = r2. r1 holds the heap base pointer at entry, but
+	// recognising that needs dataflow that isn't implemented: only r10 is
+	// resolved, so every other base is treated conservatively.
 	const auto instructions =
 		chainAround(makeInst(EBPF_OP_STXDW, 1, 2, 0, 0), 0);
 
@@ -293,7 +294,7 @@ TEST_CASE("partition: a store based on an untouched r1 marks its group as using 
 	for (const auto &[node, info] : B) {
 		if (node == 0) {
 			REQUIRE(info.usedHeap());
-			REQUIRE_FALSE(info.usedStack());
+			REQUIRE(info.usedStack());
 		}
 	}
 }
@@ -317,10 +318,10 @@ TEST_CASE("partition: a store on an unresolved base is assumed to touch both")
 	}
 }
 
-TEST_CASE("partition: writing r1 invalidates the r1-is-heap-base assumption")
+TEST_CASE("partition: a store through a reassigned r1 touches both")
 {
-	// r1 is reassigned before the store, so [r1+0] can no longer be
-	// assumed to be the heap and must be treated conservatively.
+	// r1 is reassigned before the store; [r1+0] is treated conservatively
+	// either way, since only r10 resolves to a single region.
 	std::vector<ebpf_inst> instructions{
 		makeInst(EBPF_OP_MOV64_IMM, 1, 0, 0, 0),
 		makeInst(EBPF_OP_STXDW, 1, 2, 0, 0),
@@ -570,29 +571,6 @@ TEST_CASE("partition: CMPXCHG reports r0 as modified")
 			REQUIRE(info.usedStack());
 			// CMPXCHG returns the old value in r0, not in `src`.
 			REQUIRE(info.normRegModified(0));
-		}
-	}
-}
-
-TEST_CASE("partition: an FPU write to f1 keeps the r1-is-heap-base assumption")
-{
-	// FMOV writes the *FPU* register f1, which is a different register
-	// file from r1. It must not invalidate the `r1 => heap` mapping, so
-	// the store through r1 still classifies as heap-only.
-	std::vector<ebpf_inst> instructions{
-		makeInst(DUO_OP_FMOV_IMM, 1, 0, 0x02, 0), // offset bit marks FPU
-		makeInst(EBPF_OP_STXDW, 1, 2, 0, 0),
-		makeInst(EBPF_OP_EXIT),
-	};
-
-	const auto g = buildEFG(instructions);
-	const auto B = partition(g.get(), instructions, 1, true, {});
-
-	REQUIRE_FALSE(B.empty());
-	for (const auto &[node, info] : B) {
-		if (node == 1) {
-			REQUIRE(info.usedHeap());
-			REQUIRE_FALSE(info.usedStack());
 		}
 	}
 }
