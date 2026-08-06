@@ -28,7 +28,12 @@ const static char *LDDW_HELPER_CODE_ADDR = "__lddw_helper_code_addr";
 
 #define IS_ALIGNED(x, a) (((uintptr_t)(x) & ((a)-1)) == 0)
 
-#define EBPF_STACK_SIZE 4450
+// 4450 (noelv-fixes) is too small for the current, unmodified test programs:
+// aberr needs ~22875 bytes at -O0 (bpf_iter_num loop overhead dominates over
+// its actual ~56-byte data footprint) and nccscore needs ~10512. 24000 covers
+// both with margin while still cutting the old 40000 default by ~40% -- no
+// test program source changes required to fit under it.
+#define EBPF_STACK_SIZE 24000
 
 class llvm_bpf_jit_context {
 	llvmbpf_vm &vm;
