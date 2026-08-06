@@ -269,7 +269,8 @@ llvm_bpf_jit_context::llvm_bpf_jit_context(llvmbpf_vm &vm) : vm(vm)
 	pthread_spin_init(compiling.get(), PTHREAD_PROCESS_PRIVATE);
 }
 
-llvm::Error llvm_bpf_jit_context::do_jit_compile()
+llvm::Error llvm_bpf_jit_context::do_jit_compile(uint8_t maxFuncNestDepth,
+						 uint16_t frameSize)
 {
 	spin_lock_guard guard(compiling.get());
 	auto [jit, extFuncNames, definedLddwHelpers] =
@@ -280,8 +281,9 @@ llvm::Error llvm_bpf_jit_context::do_jit_compile()
 			llvm::inconvertibleErrorCode());
 	}
 	// Handle the error from generateModule
-	auto bpfModuleOrErr =
-		generateModule(extFuncNames, definedLddwHelpers, true);
+	auto bpfModuleOrErr = generateModule(maxFuncNestDepth, frameSize,
+					     extFuncNames, definedLddwHelpers,
+					     true);
 	if (!bpfModuleOrErr) {
 		return bpfModuleOrErr.takeError();
 	}
@@ -298,10 +300,10 @@ llvm::Error llvm_bpf_jit_context::do_jit_compile()
 	return llvm::Error::success();
 }
 llvm::Error llvm_bpf_jit_context::do_jit_compile_with_ss(
+	uint8_t maxFuncNestDepth, uint16_t frameSize,
 	uintptr_t register_state_store_addr,
 	const std::unordered_map<uint16_t, CompInfo> &instInfo,
-	uintptr_t mem_snapshot_src_addr, uintptr_t mem_snapshot_dst_addr,
-	uint16_t mem_snapshot_size)
+	uintptr_t mem_snapshot_dst_addr)
 {
 	spin_lock_guard guard(compiling.get());
 	auto [jit, extFuncNames, definedLddwHelpers] =
@@ -312,10 +314,9 @@ llvm::Error llvm_bpf_jit_context::do_jit_compile_with_ss(
 			llvm::inconvertibleErrorCode());
 	}
 	auto bpfModuleOrErr = generateModule(
-		extFuncNames, definedLddwHelpers, true, true, "bpf_main",
-		false, &instInfo, register_state_store_addr,
-		mem_snapshot_src_addr, mem_snapshot_dst_addr,
-		mem_snapshot_size);
+		maxFuncNestDepth, frameSize, extFuncNames, definedLddwHelpers,
+		true, true, "bpf_main", false, &instInfo,
+		register_state_store_addr, mem_snapshot_dst_addr);
 	if (!bpfModuleOrErr) {
 		return bpfModuleOrErr.takeError();
 	}
@@ -337,7 +338,9 @@ std::vector<uint8_t> llvm_bpf_jit_context::do_aot_compile(
 	const std::vector<std::string> &lddwHelpers, bool print_ir)
 {
 	SPDLOG_DEBUG("AOT: start");
-	if (auto module = generateModule(extFuncNames, lddwHelpers, false);
+	if (auto module = generateModule(DEFAULT_MAX_FUNC_NEST_DEPTH,
+					 DEFAULT_FRAME_SIZE, extFuncNames,
+					 lddwHelpers, false);
 	    module) {
 		auto defaultTargetTriple =
 			std::string("riscv64-unknown-linux-gnu");
@@ -746,7 +749,8 @@ llvm_bpf_jit_context::generate_ptx(bool main_with_arguments,
 	// tryDefineLddwHelper(LDDW_HELPER_VAR_ADDR, (void *)vm.var_addr);
 
 	auto bpfModuleOrErr =
-		generateModule(extFuncNames, definedLddwHelpers, true,
+		generateModule(DEFAULT_MAX_FUNC_NEST_DEPTH, DEFAULT_FRAME_SIZE,
+			       extFuncNames, definedLddwHelpers, true,
 			       main_with_arguments, func_name, true);
 	if (!bpfModuleOrErr) {
 		exitOnErr(bpfModuleOrErr.takeError());
@@ -844,7 +848,8 @@ llvm_bpf_jit_context::generate_spirv(bool main_with_arguments,
 	// tryDefineLddwHelper(LDDW_HELPER_VAR_ADDR, (void *)vm.var_addr);
 
 	auto bpfModuleOrErr =
-		generateModule(extFuncNames, definedLddwHelpers, true,
+		generateModule(DEFAULT_MAX_FUNC_NEST_DEPTH, DEFAULT_FRAME_SIZE,
+			       extFuncNames, definedLddwHelpers, true,
 			       main_with_arguments, func_name, true);
 	if (!bpfModuleOrErr) {
 		exitOnErr(bpfModuleOrErr.takeError());

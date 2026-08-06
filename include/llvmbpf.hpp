@@ -73,7 +73,7 @@ class llvmbpf_vm {
 
 	// Compile the eBPF program into a JITed function
 	// return the JITed function if success
-	std::optional<precompiled_ebpf_function> compile() noexcept;
+	std::optional<precompiled_ebpf_function> compile(uint8_t maxFuncNestDepth,uint16_t frameSize) noexcept;
 
 
 	/*
@@ -81,13 +81,13 @@ class llvmbpf_vm {
 
 	Consider instructions listed in `instInfo`. If the specified instruction is a conditional branch, insert snapshotting instructions right before it (otherwise we need to insert them at both true and false branch). 
 	If the specified instruction is a normal register-modifing instruction, snapshot right after it. If it's anything else (unconditional jumps), it doesn't matter whether the snapshot happens immediately before or after it.
-	`mem` and `memSize` describes the reigon of memory allocated for the compiled program, copy these into `ExeState*->mem`. 
+	The heap memory to snapshot is the one passed to the jitted program at runtime (the `mem`/`mem_len` arguments of `precompiled_ebpf_function`); it is copied into `ExecState*->mem`, which must therefore point to a buffer of at least `mem_len` bytes.
 
 	Calls to external functions are considered register-modifing. Calls to local functions are unconditional jumps.
 
 	Only snapshot registers mentioned in `CompInfo` of the corresponding instruction. Don't snapshot memory if the component of the instruction described in `CompInfo` is register-only.
 	*/
-	std::optional<precompiled_ebpf_function> compileWithSS(const ExecState* store,const std::unordered_map<uint16_t,CompInfo>& instInfo,const std::byte* mem,const uint16_t memSize) noexcept;
+	std::optional<precompiled_ebpf_function> compileWithSS(const ExecState* store,const std::unordered_map<uint16_t,CompInfo>& instInfo,uint8_t maxFuncNestDepth,uint16_t frameSize) noexcept;
 
 	// See the spec for details.
 	// If the code involve array map access, the map_val function

@@ -69,7 +69,8 @@ int llvmbpf_vm::exec(void *mem, size_t mem_len,
 		return 0;
 	}
 	try {
-		auto func = compile();
+		auto func = compile(DEFAULT_MAX_FUNC_NEST_DEPTH,
+				    DEFAULT_FRAME_SIZE);
 		if (!func) {
 			SPDLOG_ERROR("Unable to compile eBPF program");
 			return -1;
@@ -83,14 +84,15 @@ int llvmbpf_vm::exec(void *mem, size_t mem_len,
 	}
 }
 
-std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compile() noexcept
+std::optional<bpftime::precompiled_ebpf_function>
+llvmbpf_vm::compile(uint8_t maxFuncNestDepth, uint16_t frameSize) noexcept
 {
 	if (jitted_function) {
 		error_msg = "Already compiled";
 		return jitted_function;
 	}
 	try {
-		auto res = jit_ctx->do_jit_compile();
+		auto res = jit_ctx->do_jit_compile(maxFuncNestDepth, frameSize);
 		if (res) {
 			LLVMErrorRef llvmError = llvm::wrap(std::move(res));
 			error_msg = LLVMGetErrorMessage(llvmError);
@@ -111,7 +113,7 @@ std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compile() noexcept
 std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compileWithSS(
 	const ExecState *store,
 	const std::unordered_map<uint16_t, CompInfo> &instInfo,
-	const std::byte *mem, const uint16_t memSize) noexcept
+	uint8_t maxFuncNestDepth, uint16_t frameSize) noexcept
 {
 	if (jitted_function) {
 		error_msg = "Already compiled";
@@ -119,9 +121,9 @@ std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compileWithSS(
 	}
 	try {
 		auto res = jit_ctx->do_jit_compile_with_ss(
+			maxFuncNestDepth, frameSize,
 			reinterpret_cast<uintptr_t>(store), instInfo,
-			reinterpret_cast<uintptr_t>(mem),
-			reinterpret_cast<uintptr_t>(store->mem), memSize);
+			reinterpret_cast<uintptr_t>(store->mem));
 		if (res) {
 			LLVMErrorRef llvmError = llvm::wrap(std::move(res));
 			error_msg = LLVMGetErrorMessage(llvmError);

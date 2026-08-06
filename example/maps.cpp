@@ -103,7 +103,7 @@ int main(int argc, char *argv[])
 				      (void *)bpf_map_lookup_elem);
 	// set the lddw helpers for accessing maps
 	vm.set_lddw_helpers(map_by_fd, nullptr, map_val, nullptr, nullptr);
-	auto func = vm.compile();
+	auto func = vm.compile(1, 512);
 	if (!func) {
 		std::cout << vm.get_error_message() << std::endl;
 		exit(1);

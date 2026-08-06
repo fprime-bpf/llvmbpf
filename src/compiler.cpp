@@ -35,11 +35,6 @@ using namespace llvm;
 using namespace llvm::orc;
 using namespace bpftime;
 
-const int STACK_SIZE = (EBPF_STACK_SIZE + 7) / 8;
-const int CALL_STACK_SIZE = 128;
-
-const size_t MAX_LOCAL_FUNC_DEPTH = 128;
-
 /*
     How should we compile bpf instructions into a LLVM module?
     - Split basic blocks
@@ -88,14 +83,17 @@ const size_t MAX_LOCAL_FUNC_DEPTH = 128;
 	EBPF_OP_EXIT, EBPF_OP_CALL
 */
 Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
+	uint8_t maxFuncNestDepth, uint16_t frameSize,
 	const std::vector<std::string> &extFuncNames,
 	const std::vector<std::string> &lddwHelpers,
 	bool patch_map_val_at_compile_time, bool main_func_with_arguments,
 	const std::string &func_name, bool is_gpu,
 	const std::unordered_map<uint16_t, CompInfo> *instInfo,
-	uintptr_t register_state_store_addr, uintptr_t mem_snapshot_src_addr,
-	uintptr_t mem_snapshot_dst_addr, uint16_t mem_snapshot_size)
+	uintptr_t register_state_store_addr, uintptr_t mem_snapshot_dst_addr)
 {
+	const uint32_t dataStackSize =
+		static_cast<uint32_t>(frameSize) * maxFuncNestDepth;
+	const uint32_t callStackSize = static_cast<uint32_t>(maxFuncNestDepth) * 5;
 	SPDLOG_DEBUG(
 		"Generating module: patch_map_val_at_compile_time={}, with arguments={}, func_name={}, is_gpu={}",
 		patch_map_val_at_compile_time, main_func_with_arguments,
@@ -121,17 +119,8 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 					offsetof(ExecState, fpuRegs)),
 			fpuRegisterStateStoreTy);
 	auto *i8PtrTy = Type::getInt8Ty(*context)->getPointerTo();
-	// Constant source/destination pointers for the memory snapshot memcpy.
-	// Both the program's memory buffer and ExecState->mem are fixed for
-	// the lifetime of the compiled function, so they're baked in as
-	// immediates rather than loaded at runtime.
-	auto *memSnapshotSrc = mem_snapshot_size == 0 ?
-		nullptr :
-		llvm::ConstantExpr::getIntToPtr(
-			llvm::ConstantInt::get(Type::getInt64Ty(*context),
-						mem_snapshot_src_addr),
-			i8PtrTy);
-	auto *memSnapshotDst = mem_snapshot_size == 0 ?
+	// ExecState->mem is fixed for the lifetime of the compiled function, so it's baked in as an immediate. The source and length are the heap buffer passed to the compiled function at runtime, so they're read from its arguments (see memSnapshotSrc/memSnapshotLen below).
+	auto *memSnapshotDst = mem_snapshot_dst_addr == 0 ?
 		nullptr :
 		llvm::ConstantExpr::getIntToPtr(
 			llvm::ConstantInt::get(Type::getInt64Ty(*context),
@@ -234,6 +223,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	std::vector<BasicBlock *> allBlocks;
 	// Stack used to save return address and saved registers
 	Value *callStack, *callItemCnt;
+	Value *memSnapshotSrc = nullptr, *memSnapshotLen = nullptr;
 	{
 		BasicBlock *setupBlock =
 			BasicBlock::Create(*context, "setupBlock", bpf_func);
@@ -250,42 +240,36 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 				"f" + std::to_string(i)));
 		}
 
-		// Create stack
+		// Create the data stack, one frame per possible nesting level.
 		// For SPIR-V/CUDA, use array type to avoid VLA issues
 		llvm::Value *stackBegin;
 		if (is_gpu) {
 			auto stackArrayTy = llvm::ArrayType::get(
-				builder.getInt64Ty(),
-				STACK_SIZE * MAX_LOCAL_FUNC_DEPTH + 10);
+				builder.getInt8Ty(), dataStackSize);
 			stackBegin = builder.CreateAlloca(stackArrayTy,
 							   nullptr,
 							   "stackBegin");
 		} else {
 			stackBegin = builder.CreateAlloca(
-				builder.getInt64Ty(),
-				builder.getInt32(STACK_SIZE *
-							 MAX_LOCAL_FUNC_DEPTH +
-						 10),
-				"stackBegin");
+				builder.getInt8Ty(),
+				builder.getInt32(dataStackSize), "stackBegin");
 		}
 		auto stackEnd = builder.CreateGEP(
-			builder.getInt64Ty(), stackBegin,
-			{ builder.getInt32(STACK_SIZE * MAX_LOCAL_FUNC_DEPTH) },
-			"stackEnd");
+			builder.getInt8Ty(), stackBegin,
+			{ builder.getInt32(dataStackSize) }, "stackEnd");
 		// Write stack pointer into r10
 		builder.CreateStore(stackEnd, regs[10]);
 
 		if (is_gpu) {
 			auto callStackArrayTy = llvm::ArrayType::get(
-				builder.getPtrTy(), CALL_STACK_SIZE * 5);
+				builder.getPtrTy(), callStackSize);
 			callStack = builder.CreateAlloca(callStackArrayTy,
 							  nullptr,
 							  "callStack");
 		} else {
 			callStack = builder.CreateAlloca(
 				builder.getPtrTy(),
-				builder.getInt32(CALL_STACK_SIZE * 5),
-				"callStack");
+				builder.getInt32(callStackSize), "callStack");
 		}
 		callItemCnt = builder.CreateAlloca(builder.getInt64Ty(),
 						   nullptr, "callItemCnt");
@@ -299,6 +283,10 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			builder.CreateStore(mem, regs[1]);
 			// Write memory len into r1
 			builder.CreateStore(mem_len, regs[2]);
+			// The heap buffer to snapshot is exactly the one the
+			// program was called with.
+			memSnapshotSrc = mem;
+			memSnapshotLen = mem_len;
 		}
 	}
 
@@ -383,12 +371,12 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 						      builder.getInt64(5)),
 				    callItemCnt);
 		// Restore data stack
-		// r10 += stack_size
+		// r10 += frameSize
 		builder.CreateStore(
 			builder.CreateAdd(
 				builder.CreateLoad(builder.getInt64Ty(),
 						   regs[10]),
-				builder.getInt64(STACK_SIZE)),
+				builder.getInt64(frameSize)),
 			regs[10]);
 		auto indrBr = builder.CreateIndirectBr(targetAddr);
 		for (const auto &item : localFuncRetBlks) {
@@ -435,14 +423,14 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 				slot);
 		}
 	};
-	// Emits a single memcpy of the program's memory buffer into the
+	// Emits a single memcpy of the program's heap buffer into the
 	// ExecState snapshot buffer, at the builder's current insert point.
 	auto emitMemSnapshot = [&]() {
 		if (!memSnapshotSrc || !memSnapshotDst)
 			return;
 		builder.CreateMemCpy(memSnapshotDst, MaybeAlign(1),
 				     memSnapshotSrc, MaybeAlign(1),
-				     builder.getInt64(mem_snapshot_size));
+				     memSnapshotLen);
 	};
 	// If `pc` is listed in `instInfo`, snapshot the registers marked
 	// modified in its CompInfo. Must be called with the builder's
@@ -1391,13 +1379,13 @@ According to eBPF docs, it should actually be sign-extended to
 									4)) }));
 				}
 				// Move data stack
-				// r10 -= stackSize
+				// r10 -= frameSize
 				builder.CreateStore(
 					builder.CreateSub(
 						builder.CreateLoad(
 							builder.getInt64Ty(),
 							regs[10]),
-						builder.getInt64(STACK_SIZE)),
+						builder.getInt64(frameSize)),
 					regs[10]);
 				if (auto dstBlk = loadCallDstBlock(pc, inst,
 								   instBlocks);

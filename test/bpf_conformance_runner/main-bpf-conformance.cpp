@@ -114,7 +114,9 @@ int main(int argc, char **argv)
 		vm.register_external_function(i, "helper_" + std::to_string(i),
 					      (void*)empty_helper_func);
 	}
-	auto func = vm.compile();
+	// Conformance programs may use local functions, so allow real nesting
+	// with a standard-sized eBPF frame.
+	auto func = vm.compile(8, 512);
 	assert(func);
 	uint64_t res;
 	vm.exec(&memory[0], memory.size(), res);

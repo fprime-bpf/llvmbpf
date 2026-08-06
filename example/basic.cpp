@@ -85,7 +85,7 @@ uint64_t run_ebpf_prog(const void *code, size_t code_len)
 		exit(1);
 	}
 	vm.register_external_function(2, "print", (void *)ffi_print_func);
-	auto func = vm.compile();
+	auto func = vm.compile(1, 512);
 	if (!func) {
 		fprintf(stderr, "Failed to compile: %s\n",
 			vm.get_error_message().c_str());

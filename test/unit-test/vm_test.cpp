@@ -77,9 +77,9 @@ TEST_CASE("Test simple cond")
 		uint64_t ret = 0;
 		uint64_t mem = 0;
 
-		REQUIRE(vm.compile());
+		REQUIRE(vm.compile(1, 512));
 		// compile double times
-		REQUIRE(vm.compile());
+		REQUIRE(vm.compile(1, 512));
 
 		REQUIRE(vm.exec(&mem, sizeof(mem), ret) == 0);
 		REQUIRE(ret == 4);
@@ -120,12 +120,14 @@ TEST_CASE("Test compileWithSS snapshots registers")
 
 	bpftime::ExecState state{};
 	std::memset(&state, 0, sizeof(state));
+	uint64_t mem = 0;
+	uint64_t snapshotBuf = 0;
+	state.mem = reinterpret_cast<std::byte *>(&snapshotBuf);
 
-	auto func = vm.compileWithSS(&state, instInfo, nullptr, 0);
+	auto func = vm.compileWithSS(&state, instInfo, 1, 512);
 	REQUIRE(func.has_value());
 
 	uint64_t ret = 0;
-	uint64_t mem = 0;
 	REQUIRE(vm.exec(&mem, sizeof(mem), ret) == 0);
 	REQUIRE(ret == 4);
 
@@ -162,9 +164,9 @@ TEST_CASE("Test compileWithSS snapshots memory")
 	state.mem = reinterpret_cast<std::byte *>(snapshotBuf);
 
 	uint8_t progMem[memSize] = {};
-	auto func = vm.compileWithSS(
-		&state, instInfo,
-		reinterpret_cast<const std::byte *>(progMem), memSize);
+	// The heap to snapshot is the buffer passed to exec() below, not a
+	// compile-time constant.
+	auto func = vm.compileWithSS(&state, instInfo, 1, 512);
 	REQUIRE(func.has_value());
 
 	uint64_t ret = 0;
@@ -346,7 +348,7 @@ TEST_CASE("Test compile with no require helper")
 
 	REQUIRE(vm.load_code(code, code_len) == 0);
 
-	auto func = vm.compile();
+	auto func = vm.compile(1, 512);
 	REQUIRE(!func.has_value()); // Compilation should fail due to missing
 				    // helpers
 	REQUIRE(vm.get_error_message() ==
@@ -373,7 +375,7 @@ TEST_CASE("Test compile with no LDDW helper")
 	// Set some helpers to nullptr, which should simulate a missing helper
 	vm.set_lddw_helpers(nullptr, nullptr, nullptr, nullptr, nullptr);
 
-	auto func = vm.compile();
+	auto func = vm.compile(1, 512);
 	REQUIRE(!func.has_value()); // Compilation should fail due to missing
 	REQUIRE(vm.get_error_message() ==
 		"map_val is not provided, unable to compile at pc 14");
@@ -395,7 +397,8 @@ TEST_CASE("Test compile with default LDDW helper")
 	// Set some helpers to nullptr, which should simulate a missing helper
 	vm.set_lddw_helpers(nullptr, nullptr, map_val, nullptr, nullptr);
 
-	auto func = vm.compile();
+	auto func = vm.compile(1, 512);
 	REQUIRE(func.has_value()); // Compilation should success because the
 				   // default helpers are provided
 }
+

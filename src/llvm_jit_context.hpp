@@ -32,13 +32,19 @@ const static char *LDDW_HELPER_CODE_ADDR = "__lddw_helper_code_addr";
 
 #define EBPF_STACK_SIZE 40000
 
+// Stack dimensions used by the compilation paths that don't take them from
+// the caller (AOT, PTX, SPIR-V).
+constexpr uint16_t DEFAULT_FRAME_SIZE = 10000;//our tests are compiled into eBPF with frame limit of 10000
+constexpr uint8_t DEFAULT_MAX_FUNC_NEST_DEPTH = 16;
+
 class llvm_bpf_jit_context {
 	llvmbpf_vm &vm;
 
 	std::unique_ptr<pthread_spinlock_t> compiling;
 	llvm::Expected<llvm::orc::ThreadSafeModule>
 
-	generateModule(const std::vector<std::string> &extFuncNames,
+	generateModule(uint8_t maxFuncNestDepth, uint16_t frameSize,
+		       const std::vector<std::string> &extFuncNames,
 		       const std::vector<std::string> &lddwHelpers,
 		       bool patch_map_val_at_compile_time,
 		       bool main_func_with_arguments = true,
@@ -46,9 +52,7 @@ class llvm_bpf_jit_context {
 		       bool is_gpu = false,
 		       const std::unordered_map<uint16_t, CompInfo> *instInfo = nullptr,
 		       uintptr_t register_state_store_addr = 0,
-		       uintptr_t mem_snapshot_src_addr = 0,
-		       uintptr_t mem_snapshot_dst_addr = 0,
-		       uint16_t mem_snapshot_size = 0);
+		       uintptr_t mem_snapshot_dst_addr = 0);
 	std::vector<uint8_t>
 	do_aot_compile(const std::vector<std::string> &extFuncNames,
 		       const std::vector<std::string> &lddwHelpers,
@@ -60,13 +64,12 @@ class llvm_bpf_jit_context {
 
     public:
 	std::optional<std::unique_ptr<llvm::orc::LLJIT>> jit;
-	llvm::Error do_jit_compile();
+	llvm::Error do_jit_compile(uint8_t maxFuncNestDepth, uint16_t frameSize);
 	llvm::Error
-	do_jit_compile_with_ss(uintptr_t register_state_store_addr,
+	do_jit_compile_with_ss(uint8_t maxFuncNestDepth, uint16_t frameSize,
+			       uintptr_t register_state_store_addr,
 			       const std::unordered_map<uint16_t, CompInfo> &instInfo,
-			       uintptr_t mem_snapshot_src_addr,
-			       uintptr_t mem_snapshot_dst_addr,
-			       uint16_t mem_snapshot_size);
+			       uintptr_t mem_snapshot_dst_addr);
 	llvm_bpf_jit_context(llvmbpf_vm &vm);
 	virtual ~llvm_bpf_jit_context();
 	precompiled_ebpf_function get_entry_address();

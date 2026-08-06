@@ -186,7 +186,7 @@ constexpr std::size_t USED_STACK_BIT = USED_HEAP_BIT + 1;
 // Marks the registers (if any) that `inst` writes to in `info`.
 //
 // Calls to external functions only set r0. Calls to and exits from local
-// functions move the data stack pointer (r10 -= / += STACK_SIZE, see
+// functions move the data stack pointer (r10 -= / += frameSize, see
 // "../src/compiler.cpp") and push/pop the call stack, so both are recorded
 // as modifying r10 -- per efg.hpp, a change to r10 also means the call
 // stack changed. A local function's EXIT additionally restores the
