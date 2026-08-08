@@ -296,9 +296,124 @@ TEST_CASE("Test compileWithSS snapshots stacks across a local call")
 	// [r10-4] sits frameSize+4 bytes below the top of the copied region.
 	uint32_t stored = 0;
 	std::memcpy(&stored,
-		    dataStackBuf + state.dataStackOffset - frameSize - 4,
+		    dataStackBuf + frameSize * maxDepth - frameSize - 4,
 		    sizeof(stored));
 	REQUIRE(stored == 7);
+}
+
+TEST_CASE("Test compileWithSS resumes normal instructions")
+{
+	std::vector<ebpf_inst> insts = {
+		{ EBPF_OP_MOV_IMM, BPF_REG_0, 0, 0, 10 },
+		{ EBPF_OP_ADD_IMM, BPF_REG_0, 0, 0, 1 },
+		{ EBPF_OP_ADD_IMM, BPF_REG_0, 0, 0, 5 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+	};
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.load_code(insts.data(), insts.size() * sizeof(ebpf_inst)) == 0);
+	const auto full = partition(buildEFG(vm.instructions).get(),
+				    vm.instructions, 1, true, {});
+	auto point = full.find(1);
+	REQUIRE(point != full.end());
+
+	constexpr uint16_t frameSize = 512;
+	bpftime::ExecState state{};
+	uint8_t heap[8] = {}, dataStack[frameSize] = {};
+	void *callStack[5] = {};
+	state.heap = reinterpret_cast<std::byte *>(heap);
+	state.dataStack = reinterpret_cast<std::byte *>(dataStack);
+	state.callStack = reinterpret_cast<std::byte *>(callStack);
+	state.dataStackOffset = frameSize;
+	auto func = vm.compileWithSS(&state, { *point }, 1, frameSize);
+	REQUIRE(func);
+
+	uint64_t result = 0;
+	REQUIRE(vm.exec(heap, sizeof(heap), result) == 0);
+	REQUIRE(result == 16);
+	REQUIRE(state.pc == 2);
+	REQUIRE(state.normRegs[0] == 11);
+
+	state.normRegs[0] = 20;
+	REQUIRE((*func)(sizeof(heap), &state) == 25);
+	REQUIRE((*func)(sizeof(heap), nullptr) == 16);
+}
+
+TEST_CASE("Test compileWithSS resumes before a conditional branch")
+{
+	std::vector<ebpf_inst> insts = {
+		{ EBPF_OP_MOV_IMM, BPF_REG_0, 0, 0, 0 },
+		{ EBPF_OP_MOV_IMM, BPF_REG_1, 0, 0, 7 },
+		{ EBPF_OP_JEQ_IMM, BPF_REG_1, 0, 1, 7 },
+		{ EBPF_OP_MOV_IMM, BPF_REG_0, 0, 0, 1 },
+		{ EBPF_OP_ADD_IMM, BPF_REG_0, 0, 0, 4 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+	};
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.load_code(insts.data(), insts.size() * sizeof(ebpf_inst)) == 0);
+	const auto full = partition(buildEFG(vm.instructions).get(),
+				    vm.instructions, 1, true, {});
+	auto point = full.find(2);
+	REQUIRE(point != full.end());
+
+	constexpr uint16_t frameSize = 512;
+	bpftime::ExecState state{};
+	uint8_t heap[8] = {}, dataStack[frameSize] = {};
+	void *callStack[5] = {};
+	state.heap = reinterpret_cast<std::byte *>(heap);
+	state.dataStack = reinterpret_cast<std::byte *>(dataStack);
+	state.callStack = reinterpret_cast<std::byte *>(callStack);
+	state.dataStackOffset = frameSize;
+	auto func = vm.compileWithSS(&state, { *point }, 1, frameSize);
+	REQUIRE(func);
+
+	uint64_t result = 0;
+	REQUIRE(vm.exec(heap, sizeof(heap), result) == 0);
+	REQUIRE(result == 4);
+	REQUIRE(state.pc == 2);
+	state.normRegs[1] = 0;
+	REQUIRE((*func)(sizeof(heap), &state) == 5);
+}
+
+TEST_CASE("Test compileWithSS resumes with live local-call stacks")
+{
+	std::vector<ebpf_inst> insts = {
+		{ EBPF_OP_MOV_IMM, BPF_REG_0, 0, 0, 0 },
+		{ EBPF_OP_CALL, 0, 0x01, 0, 1 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+		{ EBPF_OP_MOV_IMM, BPF_REG_1, 0, 0, 7 },
+		{ EBPF_OP_STXW, BPF_REG_10, BPF_REG_1, -4, 0 },
+		{ EBPF_OP_LDXW, BPF_REG_0, BPF_REG_10, -4, 0 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+	};
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.load_code(insts.data(), insts.size() * sizeof(ebpf_inst)) == 0);
+	const auto full = partition(buildEFG(vm.instructions).get(),
+				    vm.instructions, 1, true, {});
+	auto point = full.find(4);
+	REQUIRE(point != full.end());
+
+	constexpr uint16_t frameSize = 512;
+	constexpr uint8_t maxDepth = 4;
+	bpftime::ExecState state{};
+	uint8_t heap[8] = {}, dataStack[frameSize * maxDepth] = {};
+	void *callStack[5 * maxDepth] = {};
+	state.heap = reinterpret_cast<std::byte *>(heap);
+	state.dataStack = reinterpret_cast<std::byte *>(dataStack);
+	state.callStack = reinterpret_cast<std::byte *>(callStack);
+	state.dataStackOffset = frameSize;
+	auto func = vm.compileWithSS(&state, { *point }, maxDepth, frameSize);
+	REQUIRE(func);
+
+	uint64_t result = 0;
+	REQUIRE(vm.exec(heap, sizeof(heap), result) == 0);
+	REQUIRE(result == 7);
+	REQUIRE(state.pc == 5);
+	REQUIRE(state.dataStackOffset == 2 * frameSize);
+	REQUIRE(state.callStackSize == 5);
+	uint32_t replacement = 9;
+	std::memcpy(dataStack + frameSize * maxDepth - frameSize - 4,
+		    &replacement, sizeof(replacement));
+	REQUIRE((*func)(sizeof(heap), &state) == 9);
 }
 
 TEST_CASE("Test external function registration")
@@ -522,4 +637,3 @@ TEST_CASE("Test compile with default LDDW helper")
 	REQUIRE(func.has_value()); // Compilation should success because the
 				   // default helpers are provided
 }
-

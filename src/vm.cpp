@@ -1,7 +1,9 @@
 #include "spdlog/spdlog.h"
 #include <cerrno>
 #include <cstdint>
+#include <limits>
 #include <memory>
+#include <vector>
 #include <ebpf_inst.h>
 #include "llvm_jit_context.hpp"
 
@@ -58,10 +60,28 @@ int llvmbpf_vm::exec(void *mem, size_t mem_len,
 		     uint64_t &bpf_return_value) noexcept
 {
 	if (jitted_function) {
+		if (mem_len > std::numeric_limits<uint32_t>::max()) {
+			error_msg = "Memory length exceeds the JIT ABI limit";
+			return -E2BIG;
+		}
 		SPDLOG_TRACE("llvm-jit: Called jitted function {:x}",
 			     (uintptr_t)jitted_function.value());
-		auto ret =
-			(*jitted_function)(mem, static_cast<uint64_t>(mem_len));
+		const size_t data_stack_size =
+			static_cast<size_t>(compiled_max_func_nest_depth) *
+			compiled_frame_size;
+		const size_t call_stack_slots =
+			static_cast<size_t>(compiled_max_func_nest_depth) * 5;
+		std::vector<std::byte> data_stack(data_stack_size);
+		std::vector<void *> call_stack(call_stack_slots);
+		ExecState initial_state{};
+		initial_state.heap = static_cast<std::byte *>(mem);
+		initial_state.dataStack = data_stack.data();
+		initial_state.callStack = reinterpret_cast<std::byte *>(
+			call_stack.data());
+		initial_state.dataStackOffset = compiled_frame_size;
+		initial_state.pc = 0;
+		auto ret = (*jitted_function)(static_cast<uint32_t>(mem_len),
+					      &initial_state);
 		SPDLOG_TRACE(
 			"LLJIT: called from jitted function {:x} returned {}",
 			(uintptr_t)jitted_function.value(), ret);
@@ -101,6 +121,8 @@ llvmbpf_vm::compile(uint8_t maxFuncNestDepth, uint16_t frameSize) noexcept
 			return {};
 		}
 		auto func = jit_ctx->get_entry_address();
+		compiled_max_func_nest_depth = maxFuncNestDepth;
+		compiled_frame_size = frameSize;
 		jitted_function = func;
 		return func;
 	} catch (const std::exception &e) {
@@ -131,6 +153,8 @@ std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compileWithSS(
 			return {};
 		}
 		auto func = jit_ctx->get_entry_address();
+		compiled_max_func_nest_depth = maxFuncNestDepth;
+		compiled_frame_size = frameSize;
 		jitted_function = func;
 		return func;
 	} catch (const std::exception &e) {
@@ -178,6 +202,8 @@ llvmbpf_vm::load_aot_object(const std::vector<uint8_t> &object) noexcept
 			return {};
 		}
 		jitted_function = this->jit_ctx->get_entry_address();
+		compiled_max_func_nest_depth = DEFAULT_MAX_FUNC_NEST_DEPTH;
+		compiled_frame_size = DEFAULT_FRAME_SIZE;
 	} catch (const std::exception &e) {
 		error_msg = e.what();
 		return {};

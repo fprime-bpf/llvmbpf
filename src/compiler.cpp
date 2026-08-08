@@ -26,6 +26,7 @@
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/Debug.h>
 #include <map>
+#include <set>
 #include <vector>
 #include <endian.h>
 #include "compiler_utils.hpp"
@@ -138,6 +139,8 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		offsetof(ExecState, dataStackOffset), Type::getInt32Ty(*context));
 	auto *callStackSizeSlot = execStateField(
 		offsetof(ExecState, callStackSize), Type::getInt16Ty(*context));
+	auto *pcSnapshotSlot = execStateField(offsetof(ExecState, pc),
+					 Type::getInt16Ty(*context));
 	if (insts.empty()) {
 		return llvm::make_error<llvm::StringError>(
 			"No instructions provided",
@@ -188,6 +191,54 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	std::vector<bool> blockBegin(insts.size(), false);
 	// Split the blocks
 	blockBegin[0] = true;
+	std::set<uint16_t> resumeTargets{ 0 };
+	auto isConditionalBranch = [](const ebpf_inst &inst) {
+		if (duo_is_fpu(inst)) {
+			switch (inst.opcode) {
+			case DUO_OP_FJEQ_IMM: case DUO_OP_FJEQ_REG:
+			case DUO_OP_FJOGT_IMM: case DUO_OP_FJOGT_REG:
+			case DUO_OP_FJOGE_IMM: case DUO_OP_FJOGE_REG:
+			case DUO_OP_FJNE_IMM: case DUO_OP_FJNE_REG:
+			case DUO_OP_FJUGT_IMM: case DUO_OP_FJUGT_REG:
+			case DUO_OP_FJUGE_IMM: case DUO_OP_FJUGE_REG:
+			case DUO_OP_FJOLT_IMM: case DUO_OP_FJOLT_REG:
+			case DUO_OP_FJOLE_IMM: case DUO_OP_FJOLE_REG:
+			case DUO_OP_FJULT_IMM: case DUO_OP_FJULT_REG:
+			case DUO_OP_FJULE_IMM: case DUO_OP_FJULE_REG:
+				return true;
+			default:
+				return false;
+			}
+		}
+		const auto cls = inst.opcode & EBPF_CLS_MASK;
+		const auto mode = inst.opcode & EBPF_JMP_OP_MASK;
+		return (cls == EBPF_CLS_JMP || cls == EBPF_CLS_JMP32) &&
+		       mode != EBPF_MODE_JA && mode != EBPF_MODE_CALL &&
+		       mode != EBPF_MODE_EXIT;
+	};
+	if (instInfo) {
+		for (const auto &[pc, unused] : *instInfo) {
+			(void)unused;
+			if (pc >= insts.size())
+				continue;
+			const auto &inst = insts[pc];
+			const auto cls = inst.opcode & EBPF_CLS_MASK;
+			const auto mode = inst.opcode & EBPF_JMP_OP_MASK;
+			const bool isJump = cls == EBPF_CLS_JMP ||
+					    cls == EBPF_CLS_JMP32;
+			uint32_t target = isConditionalBranch(inst) ||
+				(isJump && mode == EBPF_MODE_JA) ||
+				(isJump && mode == EBPF_MODE_EXIT) ||
+				((inst.opcode == EBPF_OP_CALL ||
+				  inst.opcode == (EBPF_OP_CALL | 0x8)) && inst.src == 1)
+					? pc
+					: pc + (inst.opcode == EBPF_OP_LDDW ? 2 : 1);
+			if (target < insts.size()) {
+				resumeTargets.insert(static_cast<uint16_t>(target));
+				blockBegin[target] = true;
+			}
+		}
+	}
 	for (uint16_t i = 0; i < insts.size(); i++) {
 		auto curr = insts[i];
 		SPDLOG_TRACE("check pc {} opcode={} ", i,
@@ -214,10 +265,12 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		func_ty = FunctionType::get(
 			is_gpu ? Type::getVoidTy(*context) :
 				  Type::getInt64Ty(*context),
-			{ llvm::PointerType::get(
-				  llvm::Type::getInt8Ty(*context),
-				  addrSpace),
-			  Type::getInt64Ty(*context) },
+			is_gpu ? std::vector<Type *>{ llvm::PointerType::get(
+					 llvm::Type::getInt8Ty(*context), addrSpace),
+					 Type::getInt64Ty(*context) }
+			       : std::vector<Type *>{ Type::getInt32Ty(*context),
+					 llvm::PointerType::get(
+						 llvm::Type::getInt8Ty(*context), 0) },
 			false);
 	} else {
 		func_ty =
@@ -237,20 +290,70 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	Value *callStack, *callItemCnt;
 	Value *memSnapshotSrc = nullptr, *memSnapshotLen = nullptr;
 	Value *stackEnd = nullptr;
+	BasicBlock *setupBlock = nullptr;
+	Value *inputSnapshot = nullptr;
+	Value *hasInputSnapshot = nullptr;
+	Value *safeInputSnapshot = nullptr;
 	{
-		BasicBlock *setupBlock =
-			BasicBlock::Create(*context, "setupBlock", bpf_func);
+		setupBlock = BasicBlock::Create(*context, "setupBlock", bpf_func);
 		allBlocks.push_back(setupBlock);
 		IRBuilder<> builder(setupBlock);
 		// Create registers
 
+		if (main_func_with_arguments && !is_gpu)
+			inputSnapshot = bpf_func->getArg(1);
+		hasInputSnapshot = inputSnapshot
+			? builder.CreateICmpNE(inputSnapshot,
+					       ConstantPointerNull::get(
+						       cast<PointerType>(inputSnapshot->getType())))
+			: builder.getFalse();
+		safeInputSnapshot = inputSnapshot;
+		if (inputSnapshot) {
+			auto *emptySnapshotSize = builder.CreateSelect(
+				hasInputSnapshot, builder.getInt32(0),
+				builder.getInt32(sizeof(ExecState)));
+			auto *emptySnapshot = builder.CreateAlloca(
+				builder.getInt8Ty(), emptySnapshotSize,
+				"emptySnapshot");
+			safeInputSnapshot = builder.CreateSelect(
+				hasInputSnapshot, inputSnapshot, emptySnapshot,
+				"safeInputSnapshot");
+		}
+		auto inputField = [&](size_t off, Type *ty) -> Value * {
+			auto *addr = builder.CreateGEP(builder.getInt8Ty(), safeInputSnapshot,
+					       builder.getInt64(off));
+			return builder.CreatePointerCast(addr, ty->getPointerTo());
+		};
 		for (int i = 0; i <= 10; i++) {
-			regs.push_back(builder.CreateAlloca(
-				builder.getInt64Ty(), nullptr,
-				"r" + std::to_string(i)));
-			fregs.push_back(builder.CreateAlloca(
-				builder.getFloatTy(), nullptr,
-				"f" + std::to_string(i)));
+			Value *localCount = nullptr;
+			if (inputSnapshot && i < 10)
+				localCount = builder.CreateSelect(
+					hasInputSnapshot, builder.getInt32(0),
+					builder.getInt32(1));
+			auto *localReg = builder.CreateAlloca(
+				builder.getInt64Ty(), localCount,
+				"local_r" + std::to_string(i));
+			regs.push_back(i < 10 && inputSnapshot
+				? builder.CreateSelect(
+					hasInputSnapshot,
+					inputField(offsetof(ExecState, normRegs) +
+						   i * sizeof(uint64_t), builder.getInt64Ty()),
+					localReg, "r" + std::to_string(i))
+				: localReg);
+			Value *localFpuCount = inputSnapshot
+				? builder.CreateSelect(hasInputSnapshot,
+					builder.getInt32(0), builder.getInt32(1))
+				: nullptr;
+			auto *localFreg = builder.CreateAlloca(
+				builder.getFloatTy(), localFpuCount,
+				"local_f" + std::to_string(i));
+			fregs.push_back(inputSnapshot
+				? builder.CreateSelect(
+					hasInputSnapshot,
+					inputField(offsetof(ExecState, fpuRegs) +
+						   i * sizeof(float), builder.getFloatTy()),
+					localFreg, "f" + std::to_string(i))
+				: localFreg);
 		}
 
 		// Create the data stack, one frame per possible nesting level.
@@ -263,15 +366,37 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 							   nullptr,
 							   "stackBegin");
 		} else {
+			Value *localStackSize = inputSnapshot
+				? builder.CreateSelect(hasInputSnapshot,
+					builder.getInt32(0), builder.getInt32(dataStackSize))
+				: builder.getInt32(dataStackSize);
 			stackBegin = builder.CreateAlloca(
 				builder.getInt8Ty(),
-				builder.getInt32(dataStackSize), "stackBegin");
+				localStackSize, "stackBegin");
+		}
+		if (inputSnapshot) {
+			auto *snapshotStack = builder.CreateLoad(
+				builder.getPtrTy(), inputField(offsetof(ExecState, dataStack),
+							 builder.getPtrTy()));
+			stackBegin = builder.CreateSelect(hasInputSnapshot, snapshotStack,
+						  stackBegin, "dataStack");
 		}
 		stackEnd = builder.CreateGEP(
 			builder.getInt8Ty(), stackBegin,
 			{ builder.getInt32(dataStackSize) }, "stackEnd");
-		// Write stack pointer into r10
-		builder.CreateStore(stackEnd, regs[10]);
+		Value *r10 = stackEnd;
+		if (inputSnapshot) {
+			auto *used = builder.CreateZExt(
+				builder.CreateLoad(builder.getInt32Ty(), inputField(
+					offsetof(ExecState, dataStackOffset), builder.getInt32Ty())),
+				builder.getInt64Ty());
+			r10 = builder.CreateSelect(
+				hasInputSnapshot,
+				builder.CreateGEP(builder.getInt8Ty(), stackEnd,
+					{ builder.CreateSub(builder.getInt64(frameSize), used) }),
+				stackEnd);
+		}
+		builder.CreateStore(r10, regs[10]);
 
 		if (is_gpu) {
 			auto callStackArrayTy = llvm::ArrayType::get(
@@ -280,26 +405,61 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 							  nullptr,
 							  "callStack");
 		} else {
+			Value *localCallStackSize = inputSnapshot
+				? builder.CreateSelect(hasInputSnapshot,
+					builder.getInt32(0), builder.getInt32(callStackSize))
+				: builder.getInt32(callStackSize);
 			callStack = builder.CreateAlloca(
 				builder.getPtrTy(),
-				builder.getInt32(callStackSize), "callStack");
+				localCallStackSize, "callStack");
+		}
+		if (inputSnapshot) {
+			auto *snapshotCallStack = builder.CreateLoad(
+				builder.getPtrTy(), inputField(offsetof(ExecState, callStack),
+							 builder.getPtrTy()));
+			callStack = builder.CreateSelect(hasInputSnapshot, snapshotCallStack,
+						  callStack, "callStackStorage");
 		}
 		callItemCnt = builder.CreateAlloca(builder.getInt64Ty(),
 						   nullptr, "callItemCnt");
-		builder.CreateStore(builder.getInt64(0), callItemCnt);
+		Value *initialCallCount = builder.getInt64(0);
+		if (inputSnapshot)
+			initialCallCount = builder.CreateSelect(
+				hasInputSnapshot,
+				builder.CreateZExt(builder.CreateLoad(builder.getInt16Ty(),
+					inputField(offsetof(ExecState, callStackSize),
+						   builder.getInt16Ty())), builder.getInt64Ty()),
+				builder.getInt64(0));
+		builder.CreateStore(initialCallCount, callItemCnt);
 		if (main_func_with_arguments) {
-			// Get args of uint64_t bpf_main(uint64_t, uint64_t)
-			llvm::Argument *mem = bpf_func->getArg(0);
-			llvm::Argument *mem_len = bpf_func->getArg(1);
+			llvm::Value *mem = is_gpu ? bpf_func->getArg(0) : nullptr;
+			llvm::Value *mem_len = is_gpu ? bpf_func->getArg(1) :
+							      bpf_func->getArg(0);
+			if (!is_gpu)
+				mem = builder.CreateSelect(
+					hasInputSnapshot,
+					builder.CreateLoad(builder.getPtrTy(), inputField(
+						offsetof(ExecState, heap), builder.getPtrTy())),
+					ConstantPointerNull::get(builder.getPtrTy()));
 
 			// Write memory address into r1
-			builder.CreateStore(mem, regs[1]);
+			builder.CreateStore(inputSnapshot
+				? builder.CreateSelect(hasInputSnapshot, mem,
+						       ConstantPointerNull::get(builder.getPtrTy()))
+				: mem, regs[1]);
 			// Write memory len into r1
-			builder.CreateStore(mem_len, regs[2]);
+			Value *heapLen = is_gpu ? static_cast<Value *>(mem_len) :
+				builder.CreateSelect(hasInputSnapshot,
+					builder.CreateZExt(mem_len, builder.getInt64Ty()),
+					builder.getInt64(0));
+			builder.CreateStore(inputSnapshot
+				? builder.CreateSelect(hasInputSnapshot, heapLen,
+						       builder.getInt64(0))
+				: heapLen, regs[2]);
 			// The heap buffer to snapshot is exactly the one the
 			// program was called with.
 			memSnapshotSrc = mem;
-			memSnapshotLen = mem_len;
+			memSnapshotLen = heapLen;
 		}
 	}
 
@@ -332,6 +492,27 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 					localFuncRetBlks[i] = blockAddr;
 				}
 			}
+		}
+	}
+	{
+		IRBuilder<> builder(setupBlock);
+		if (inputSnapshot) {
+			auto *pcAddr = builder.CreateGEP(
+				builder.getInt8Ty(), safeInputSnapshot,
+				builder.getInt64(offsetof(ExecState, pc)));
+			auto *resumePc = builder.CreateSelect(
+				hasInputSnapshot,
+				builder.CreateLoad(builder.getInt16Ty(), pcAddr),
+				builder.getInt16(0));
+			auto *dispatch = builder.CreateSwitch(resumePc, instBlocks[0],
+							 resumeTargets.size());
+			for (uint16_t target : resumeTargets) {
+				if (target != 0)
+					dispatch->addCase(builder.getInt16(target),
+							  instBlocks[target]);
+			}
+		} else {
+			builder.CreateBr(instBlocks[0]);
 		}
 	}
 
@@ -477,8 +658,11 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			builder.CreateTrunc(used, builder.getInt32Ty()),
 			dataStackOffsetSlot);
 		if (dataStackSnapshotDstSlot) {
-			auto *dst = builder.CreateLoad(builder.getPtrTy(),
+			auto *dstBase = builder.CreateLoad(builder.getPtrTy(),
 						       dataStackSnapshotDstSlot);
+			auto *dst = builder.CreateGEP(
+				builder.getInt8Ty(), dstBase,
+				{ builder.CreateSub(builder.getInt64(dataStackSize), used) });
 			auto *src = builder.CreateIntToPtr(liveBase,
 							   builder.getPtrTy());
 			builder.CreateMemCpy(dst, MaybeAlign(1), src,
@@ -507,7 +691,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	// If `pc` is listed in `instInfo`, snapshot the registers marked
 	// modified in its CompInfo. Must be called with the builder's
 	// insert point already set to where the snapshot should land.
-	auto maybeSnapshot = [&](uint16_t pc) {
+	auto maybeSnapshot = [&](uint16_t pc, uint16_t resumePc) {
 		if (!instInfo)
 			return;
 		auto it = instInfo->find(pc);
@@ -521,6 +705,8 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			emitHeapSnapshot();
 		if (it->second.usedStack())
 			emitStackSnapshot();
+		if (pcSnapshotSlot)
+			builder.CreateStore(builder.getInt16(resumePc), pcSnapshotSlot);
 	};
 	for (uint16_t pc = 0; pc < insts.size(); pc++) {
 		auto inst = insts[pc];
@@ -570,6 +756,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 							   regs[inst.dst]),
 					{ builder.getInt64(inst.offset) });
 				builder.CreateStore(src_val, addr);
+				maybeSnapshot(pc, pc + 1);
 				break;
 			}
 			case DUO_OP_FLDX: {
@@ -605,7 +792,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 
 				emitStoreFPUResult(inst, &fregs[0], builder,
 						   src_val);
-				maybeSnapshot(pc);
+				maybeSnapshot(pc, pc + 1);
 				break;
 			}
 			case DUO_OP_FADD_IMM:
@@ -623,7 +810,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 
 				emitFPUWithDstAndSrc(inst, builder, &fregs[0],
 						     func);
-				maybeSnapshot(pc);
+				maybeSnapshot(pc, pc + 1);
 
 				break;
 			}
@@ -650,7 +837,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			case DUO_OP_FJULE_REG: {
 				auto f_cmp_func = get_fcmp_func(inst, builder);
 
-				maybeSnapshot(pc);
+				maybeSnapshot(pc, pc);
 				auto ret = emitCondJmpWithDstAndSrcFPU(
 					builder, pc, inst, instBlocks,
 					&fregs[0], f_cmp_func);
@@ -1099,28 +1286,28 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_STB:
 		case EBPF_OP_STXB: {
 			emitStore(inst, builder, &regs[0], builder.getInt8Ty());
-			maybeSnapshot(pc);
+			maybeSnapshot(pc, pc + 1);
 			break;
 		}
 		case EBPF_OP_STH:
 		case EBPF_OP_STXH: {
 			emitStore(inst, builder, &regs[0],
 				  builder.getInt16Ty());
-			maybeSnapshot(pc);
+			maybeSnapshot(pc, pc + 1);
 			break;
 		}
 		case EBPF_OP_STW:
 		case EBPF_OP_STXW: {
 			emitStore(inst, builder, &regs[0],
 				  builder.getInt32Ty());
-			maybeSnapshot(pc);
+			maybeSnapshot(pc, pc + 1);
 			break;
 		}
 		case EBPF_OP_STDW:
 		case EBPF_OP_STXDW: {
 			emitStore(inst, builder, &regs[0],
 				  builder.getInt64Ty());
-			maybeSnapshot(pc);
+			maybeSnapshot(pc, pc + 1);
 			break;
 		}
 			// LDX
@@ -1383,11 +1570,12 @@ According to eBPF docs, it should actually be sign-extended to
 					}
 				}
 			}
-			maybeSnapshot(raw_pc);
+			maybeSnapshot(raw_pc, raw_pc + 2);
 			break;
 		}
 			// JMP
 		case EBPF_OP_JA: {
+			maybeSnapshot(pc, pc);
 			if (auto dst =
 				    loadJmpDstBlock(pc, inst, instBlocks, true);
 			    dst) {
@@ -1400,6 +1588,7 @@ According to eBPF docs, it should actually be sign-extended to
 		}
 		// JMP imm
 		case EBPF_OP_JA_IMM: {
+			maybeSnapshot(pc, pc);
 			if (auto dst = loadJmpDstBlock(pc, inst, instBlocks,
 						       false);
 			    dst) {
@@ -1417,6 +1606,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_CALL | 0x8: {
 			// Call local function
 			if (inst.src == 0x1) {
+				maybeSnapshot(pc, pc);
 				// Each call will put five 8byte
 				// integer onto the call stack
 				// the most top one is the
@@ -1475,12 +1665,13 @@ According to eBPF docs, it should actually be sign-extended to
 				    !exp) {
 					return exp.takeError();
 				}
-				maybeSnapshot(pc);
+				maybeSnapshot(pc, pc + 1);
 			}
 
 			break;
 		}
 		case EBPF_OP_EXIT: {
+			maybeSnapshot(pc, pc);
 			builder.CreateCondBr(
 				builder.CreateICmpEQ(
 					builder.CreateLoad(builder.getInt64Ty(),
@@ -1500,7 +1691,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JEQ_IMM:
 		case EBPF_OP_JEQ32_REG:
 		case EBPF_OP_JEQ_REG: {
-			maybeSnapshot(pc);
+			maybeSnapshot(pc, pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1513,7 +1704,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JGT_IMM:
 		case EBPF_OP_JGT32_REG:
 		case EBPF_OP_JGT_REG: {
-			maybeSnapshot(pc);
+			maybeSnapshot(pc, pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1525,7 +1716,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JGE_IMM:
 		case EBPF_OP_JGE32_REG:
 		case EBPF_OP_JGE_REG: {
-			maybeSnapshot(pc);
+			maybeSnapshot(pc, pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1544,7 +1735,7 @@ According to eBPF docs, it should actually be sign-extended to
 				auto [src, dst, zero] =
 					emitJmpLoadSrcAndDstAndZero(
 						inst, &regs[0], builder);
-				maybeSnapshot(pc);
+				maybeSnapshot(pc, pc);
 				builder.CreateCondBr(
 					builder.CreateICmpNE(
 						builder.CreateAnd(dst, src),
@@ -1560,7 +1751,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JNE_IMM:
 		case EBPF_OP_JNE32_REG:
 		case EBPF_OP_JNE_REG: {
-			maybeSnapshot(pc);
+			maybeSnapshot(pc, pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1572,7 +1763,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JSGT_IMM:
 		case EBPF_OP_JSGT32_REG:
 		case EBPF_OP_JSGT_REG: {
-			maybeSnapshot(pc);
+			maybeSnapshot(pc, pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1584,7 +1775,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JSGE_IMM:
 		case EBPF_OP_JSGE32_REG:
 		case EBPF_OP_JSGE_REG: {
-			maybeSnapshot(pc);
+			maybeSnapshot(pc, pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1596,7 +1787,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JLT_IMM:
 		case EBPF_OP_JLT32_REG:
 		case EBPF_OP_JLT_REG: {
-			maybeSnapshot(pc);
+			maybeSnapshot(pc, pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1608,7 +1799,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JLE_IMM:
 		case EBPF_OP_JLE32_REG:
 		case EBPF_OP_JLE_REG: {
-			maybeSnapshot(pc);
+			maybeSnapshot(pc, pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1620,7 +1811,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JSLT_IMM:
 		case EBPF_OP_JSLT32_REG:
 		case EBPF_OP_JSLT_REG: {
-			maybeSnapshot(pc);
+			maybeSnapshot(pc, pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1632,7 +1823,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_JSLE_IMM:
 		case EBPF_OP_JSLE32_REG:
 		case EBPF_OP_JSLE_REG: {
-			maybeSnapshot(pc);
+			maybeSnapshot(pc, pc);
 			HANDLE_ERR(emitCondJmpWithDstAndSrc(
 				builder, pc, inst, instBlocks, &regs[0],
 				[&](auto dst, auto src) {
@@ -1731,7 +1922,7 @@ According to eBPF docs, it should actually be sign-extended to
 					llvm::inconvertibleErrorCode());
 			}
 			}
-			maybeSnapshot(pc);
+			maybeSnapshot(pc, pc + 1);
 			break;
 		}
 		default:
@@ -1802,7 +1993,7 @@ According to eBPF docs, it should actually be sign-extended to
 		case EBPF_OP_LDXH:
 		case EBPF_OP_LDXW:
 		case EBPF_OP_LDXDW: {
-			maybeSnapshot(pc);
+			maybeSnapshot(pc, pc + 1);
 			break;
 		}
 		default:
