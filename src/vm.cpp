@@ -58,6 +58,8 @@ void llvmbpf_vm::unload_code() noexcept
 int llvmbpf_vm::resume(uint32_t heapLen,ExecState* from,uint64_t &bpf_return_value) noexcept{
 	if(!jitted_function)
 		return -2;
+	if(!from)
+		return -3;
 	SPDLOG_TRACE("llvm-jit: Called jitted function {:x} with states {:x}", (uintptr_t)jitted_function.value(),reinterpret_cast<uintptr_t>(from));
 	bpf_return_value=(*jitted_function)(heapLen, from);
 	SPDLOG_TRACE(
