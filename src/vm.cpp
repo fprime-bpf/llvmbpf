@@ -73,15 +73,19 @@ int llvmbpf_vm::exec(void *mem, uint32_t mem_len,
 	if (jitted_function) {
 		SPDLOG_TRACE("llvm-jit: Called jitted function {:x}",
 			     (uintptr_t)jitted_function.value());
-		auto data_stack=std::make_unique<std::byte[]>(static_cast<size_t>(compiled_max_func_nest_depth) * compiled_frame_size);
-		auto call_stack=std::make_unique<std::byte[]>(static_cast<size_t>(compiled_max_func_nest_depth) * 5*sizeof(uint64_t));
-		ExecState initial_state;
-		initial_state.heap = static_cast<std::byte *>(mem);
-		initial_state.dataStack = data_stack.get();
-		initial_state.callStack = call_stack.get();
-		initial_state.dataStackOffset = compiled_frame_size;
-		initial_state.pc = 0;
-		bpf_return_value = (*jitted_function)(mem_len, &initial_state);
+		if(mem){
+			auto data_stack=std::make_unique<std::byte[]>(static_cast<size_t>(compiled_max_func_nest_depth) * compiled_frame_size);
+			auto call_stack=std::make_unique<std::byte[]>(static_cast<size_t>(compiled_max_func_nest_depth) * 5*sizeof(uint64_t));
+			ExecState initial_state;
+			initial_state.heap = static_cast<std::byte *>(mem);
+			initial_state.dataStack = data_stack.get();
+			initial_state.callStack = call_stack.get();
+			initial_state.dataStackOffset = compiled_frame_size;
+			initial_state.pc = 0;
+			bpf_return_value = (*jitted_function)(mem_len, &initial_state);
+		}else{
+			bpf_return_value = (*jitted_function)(0, nullptr);
+		}
 		SPDLOG_TRACE(
 			"LLJIT: called from jitted function {:x} returned {}",
 			(uintptr_t)jitted_function.value(), bpf_return_value);
