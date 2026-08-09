@@ -39,7 +39,7 @@ When `snapshot!=nullptr`, resume execution from the state described within. This
 is avoided.
 
 When `snapshot==nullptr`, then `heapSize` is ignored (no heap). Stack memories and registers are allocated when executing the program, like previous implementation. Do the same when
-the jitted function is called without any arguments.
+the jitted function is called without any arguments. If `snapshot->pc` is not a valid compiled resume target, the function returns that PC in bits 0-15 with bit 16 set.
 */
 using precompiled_ebpf_function = uint64_t (*)(uint32_t heapSize,
 					       ExecState *snapshot);

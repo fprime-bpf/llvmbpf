@@ -291,9 +291,11 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	Value *memSnapshotSrc = nullptr, *memSnapshotLen = nullptr;
 	Value *stackEnd = nullptr;
 	BasicBlock *setupBlock = nullptr;
+	BasicBlock *invalidResumePcBlock = nullptr;
 	Value *inputSnapshot = nullptr;
 	Value *hasInputSnapshot = nullptr;
 	Value *safeInputSnapshot = nullptr;
+	Value *invalidResumePc = nullptr;
 	{
 		setupBlock = BasicBlock::Create(*context, "setupBlock", bpf_func);
 		allBlocks.push_back(setupBlock);
@@ -504,8 +506,12 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 				hasInputSnapshot,
 				builder.CreateLoad(builder.getInt16Ty(), pcAddr),
 				builder.getInt16(0));
-			auto *dispatch = builder.CreateSwitch(resumePc, instBlocks[0],
-							 resumeTargets.size());
+			invalidResumePc = resumePc;
+			invalidResumePcBlock = BasicBlock::Create(
+				*context, "invalidResumePc", bpf_func);
+			auto *dispatch = builder.CreateSwitch(resumePc, invalidResumePcBlock,
+							 resumeTargets.size() + 1);
+			dispatch->addCase(builder.getInt16(0), instBlocks[0]);
 			for (uint16_t target : resumeTargets) {
 				if (target != 0)
 					dispatch->addCase(builder.getInt16(target),
@@ -514,6 +520,15 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		} else {
 			builder.CreateBr(instBlocks[0]);
 		}
+	}
+	if (invalidResumePcBlock) {
+		IRBuilder<> builder(invalidResumePcBlock);
+		// ExecState::pc is 16 bits, so bit 16 flags an invalid resume PC
+		// without losing the PC value in the low 16 bits.
+		auto *flaggedPc = builder.CreateOr(
+			builder.CreateZExt(invalidResumePc, builder.getInt64Ty()),
+			builder.getInt64(1ULL << 16));
+		builder.CreateRet(flaggedPc);
 	}
 
 	// Basic block used to exit the eBPF program

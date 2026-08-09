@@ -338,6 +338,35 @@ TEST_CASE("Test compileWithSS resumes normal instructions")
 	REQUIRE((*func)(sizeof(heap), nullptr) == 16);
 }
 
+TEST_CASE("Test compileWithSS rejects an invalid resume PC")
+{
+	std::vector<ebpf_inst> insts = {
+		{ EBPF_OP_MOV_IMM, BPF_REG_0, 0, 0, 10 },
+		{ EBPF_OP_ADD_IMM, BPF_REG_0, 0, 0, 1 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+	};
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.load_code(insts.data(), insts.size() * sizeof(ebpf_inst)) == 0);
+	const auto full = partition(buildEFG(vm.instructions).get(),
+				    vm.instructions, 1, true, {});
+	auto point = full.find(1);
+	REQUIRE(point != full.end());
+
+	constexpr uint16_t frameSize = 512;
+	bpftime::ExecState state{};
+	uint8_t heap[8] = {}, dataStack[frameSize] = {};
+	void *callStack[5] = {};
+	state.heap = reinterpret_cast<std::byte *>(heap);
+	state.dataStack = reinterpret_cast<std::byte *>(dataStack);
+	state.callStack = reinterpret_cast<std::byte *>(callStack);
+	state.dataStackOffset = frameSize;
+	auto func = vm.compileWithSS(&state, { *point }, 1, frameSize);
+	REQUIRE(func);
+
+	state.pc = 42;
+	REQUIRE((*func)(sizeof(heap), &state) == (uint64_t{ 42 } | (1ULL << 16)));
+}
+
 TEST_CASE("Test compileWithSS resumes before a conditional branch")
 {
 	std::vector<ebpf_inst> insts = {
