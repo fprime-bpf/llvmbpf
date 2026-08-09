@@ -420,16 +420,16 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			callStack = builder.CreateSelect(hasInputSnapshot, snapshotCallStack,
 						  callStack, "callStackStorage");
 		}
-		callItemCnt = builder.CreateAlloca(builder.getInt64Ty(),
+		callItemCnt = builder.CreateAlloca(builder.getInt16Ty(),
 						   nullptr, "callItemCnt");
-		Value *initialCallCount = builder.getInt64(0);
+		Value *initialCallCount = builder.getInt16(0);
 		if (inputSnapshot)
 			initialCallCount = builder.CreateSelect(
 				hasInputSnapshot,
-				builder.CreateZExt(builder.CreateLoad(builder.getInt16Ty(),
+				builder.CreateLoad(builder.getInt16Ty(),
 					inputField(offsetof(ExecState, callStackSize),
-						   builder.getInt16Ty())), builder.getInt64Ty()),
-				builder.getInt64(0));
+						   builder.getInt16Ty())),
+				builder.getInt16(0));
 		builder.CreateStore(initialCallCount, callItemCnt);
 		if (main_func_with_arguments) {
 			llvm::Value *mem = is_gpu ? bpf_func->getArg(0) : nullptr;
@@ -540,14 +540,14 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		// r7, r8, r9
 		IRBuilder<> builder(localRetBlk);
 		Value *count =
-			builder.CreateLoad(builder.getInt64Ty(), callItemCnt);
+			builder.CreateLoad(builder.getInt16Ty(), callItemCnt);
 		// Load return address
 		Value *targetAddr = builder.CreateLoad(
 			builder.getPtrTy(),
 			builder.CreateGEP(
 				builder.getPtrTy(), callStack,
 				{ builder.CreateSub(count,
-						    builder.getInt64(1)) }));
+						    builder.getInt16(1)) }));
 		// Restore registers
 		for (int i = 6; i <= 9; i++) {
 			builder.CreateStore(
@@ -557,12 +557,12 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 						builder.getInt64Ty(), callStack,
 						{ builder.CreateSub(
 							count,
-							builder.getInt64(
+							builder.getInt16(
 								i - 4)) })),
 				regs[i]);
 		}
 		builder.CreateStore(builder.CreateSub(count,
-						      builder.getInt64(5)),
+						      builder.getInt16(5)),
 				    callItemCnt);
 		// Restore data stack
 		// r10 += frameSize
@@ -670,17 +670,14 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		}
 		// --- call stack ---
 		auto *count =
-			builder.CreateLoad(builder.getInt64Ty(), callItemCnt);
+			builder.CreateLoad(builder.getInt16Ty(), callItemCnt);
 		if (callStackSizeSlot)
-			builder.CreateStore(
-				builder.CreateTrunc(count,
-						    builder.getInt16Ty()),
-				callStackSizeSlot);
+			builder.CreateStore(count, callStackSizeSlot);
 		if (callStackSnapshotDstSlot) {
 			auto *dst = builder.CreateLoad(builder.getPtrTy(),
 						       callStackSnapshotDstSlot);
 			auto *bytes = builder.CreateMul(
-				count,
+				builder.CreateZExt(count, builder.getInt64Ty()),
 				builder.getInt64(sizeof(void *)),
 				"callStackBytes");
 			builder.CreateMemCpy(dst, MaybeAlign(alignof(void *)),
@@ -1613,9 +1610,9 @@ According to eBPF docs, it should actually be sign-extended to
 				// return address, followed by
 				// r6, r7, r8, r9
 				Value *nextPos = builder.CreateAdd(
-					builder.CreateLoad(builder.getInt64Ty(),
+					builder.CreateLoad(builder.getInt16Ty(),
 							   callItemCnt),
-					builder.getInt64(5));
+					builder.getInt16(5));
 				builder.CreateStore(nextPos, callItemCnt);
 				assert(localFuncRetBlks.contains(pc + 1));
 				// Store returning address
@@ -1625,7 +1622,7 @@ According to eBPF docs, it should actually be sign-extended to
 						builder.getPtrTy(), callStack,
 						{ builder.CreateSub(
 							nextPos,
-							builder.getInt64(1)) }));
+							builder.getInt16(1)) }));
 				// Store callee-saved registers
 				for (int i = 6; i <= 9; i++) {
 					builder.CreateStore(
@@ -1637,7 +1634,7 @@ According to eBPF docs, it should actually be sign-extended to
 							callStack,
 							{ builder.CreateSub(
 								nextPos,
-								builder.getInt64(
+								builder.getInt16(
 									i -
 									4)) }));
 				}
@@ -1674,9 +1671,9 @@ According to eBPF docs, it should actually be sign-extended to
 			maybeSnapshot(pc, pc);
 			builder.CreateCondBr(
 				builder.CreateICmpEQ(
-					builder.CreateLoad(builder.getInt64Ty(),
+					builder.CreateLoad(builder.getInt16Ty(),
 							   callItemCnt),
-					builder.getInt64(0)),
+					builder.getInt16(0)),
 				exitBlk, localRetBlk);
 			break;
 		}
