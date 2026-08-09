@@ -69,8 +69,15 @@ class llvmbpf_vm {
 	// If the program is JIT compiled, it will be executed directly
 	// If not, it will be JIT compiled, cached and executed
 	// return 0 on success
-	int exec(void *mem, size_t mem_len,
+	int exec(void *mem, uint32_t mem_len,
 		 uint64_t &bpf_return_value) noexcept;
+
+	/*
+	Like `exec`, but resumes exeuction using the provided states, assuming the state is valid.
+
+	Unlike `exec`, `resume` won't try to jit compile the program, return -2 when it's not compiled.
+	*/
+	int resume(uint32_t heapLen,ExecState*,uint64_t &bpf_return_value)noexcept;
 
 	// Do AOT compile and generate the ELF object file
 	// The external functions are required to be registered before

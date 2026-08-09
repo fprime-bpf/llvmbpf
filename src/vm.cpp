@@ -55,37 +55,34 @@ void llvmbpf_vm::unload_code() noexcept
 {
 	instructions.clear();
 }
-
-int llvmbpf_vm::exec(void *mem, size_t mem_len,
+int llvmbpf_vm::resume(uint32_t heapLen,ExecState* from,uint64_t &bpf_return_value) noexcept{
+	if(!jitted_function)
+		return -2;
+	SPDLOG_TRACE("llvm-jit: Called jitted function {:x} with states {:x}", (uintptr_t)jitted_function.value(),reinterpret_cast<uintptr_t>(from));
+	bpf_return_value=(*jitted_function)(heapLen, from);
+	SPDLOG_TRACE(
+			"LLJIT: called from jitted function {:x} returned {}",
+			(uintptr_t)jitted_function.value(), bpf_return_value);
+	return 0;
+}
+int llvmbpf_vm::exec(void *mem, uint32_t mem_len,
 		     uint64_t &bpf_return_value) noexcept
 {
 	if (jitted_function) {
-		if (mem_len > std::numeric_limits<uint32_t>::max()) {
-			error_msg = "Memory length exceeds the JIT ABI limit";
-			return -E2BIG;
-		}
 		SPDLOG_TRACE("llvm-jit: Called jitted function {:x}",
 			     (uintptr_t)jitted_function.value());
-		const size_t data_stack_size =
-			static_cast<size_t>(compiled_max_func_nest_depth) *
-			compiled_frame_size;
-		const size_t call_stack_slots =
-			static_cast<size_t>(compiled_max_func_nest_depth) * 5;
-		std::vector<std::byte> data_stack(data_stack_size);
-		std::vector<void *> call_stack(call_stack_slots);
-		ExecState initial_state{};
+		auto data_stack=std::make_unique<std::byte[]>(static_cast<size_t>(compiled_max_func_nest_depth) * compiled_frame_size);
+		auto call_stack=std::make_unique<std::byte[]>(static_cast<size_t>(compiled_max_func_nest_depth) * 5*sizeof(uint64_t));
+		ExecState initial_state;
 		initial_state.heap = static_cast<std::byte *>(mem);
-		initial_state.dataStack = data_stack.data();
-		initial_state.callStack = reinterpret_cast<std::byte *>(
-			call_stack.data());
+		initial_state.dataStack = data_stack.get();
+		initial_state.callStack = call_stack.get();
 		initial_state.dataStackOffset = compiled_frame_size;
 		initial_state.pc = 0;
-		auto ret = (*jitted_function)(static_cast<uint32_t>(mem_len),
-					      &initial_state);
+		bpf_return_value = (*jitted_function)(mem_len, &initial_state);
 		SPDLOG_TRACE(
 			"LLJIT: called from jitted function {:x} returned {}",
-			(uintptr_t)jitted_function.value(), ret);
-		bpf_return_value = ret;
+			(uintptr_t)jitted_function.value(), bpf_return_value);
 		return 0;
 	}
 	try {
