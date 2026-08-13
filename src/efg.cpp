@@ -429,7 +429,7 @@ CutQuality evaluateCut(uint16_t n, const std::vector<UEdge> &edges,
 } // namespace
 
 std::unordered_map<uint16_t, CompInfo>
-partition(const G_t G, const std::vector<ebpf_inst> &instructions,
+partition1(const G_t G, const std::vector<ebpf_inst> &instructions,
 	  uint16_t maxSize, bool useSrc,
 	  const std::unordered_set<int32_t> &regOnlyExtFuncs) noexcept
 {
@@ -563,6 +563,111 @@ partition(const G_t G, const std::vector<ebpf_inst> &instructions,
 
 	return B;
 }
+
+std::unordered_map<uint16_t, CompInfo>
+partition(const G_t G, const std::vector<ebpf_inst> &instructions,
+	  uint16_t maxSize, bool useSrc,
+	  const std::unordered_set<int32_t> &regOnlyExtFuncs) noexcept
+{
+	const uint16_t n = static_cast<uint16_t>(instructions.size());
+	std::unordered_map<uint16_t, CompInfo> B;
+	if (n == 0 || maxSize == 0)
+		return B;
+
+	const std::vector<bool> payload = lddwPayloadSlots(instructions);
+	std::vector<UEdge> edges;
+	std::vector<std::vector<uint16_t> > adjacency(n);
+	for (uint16_t src = 0; src < n; ++src) {
+		for (const Edge &edge : G[src]) {
+			if (edge.dst == src)
+				continue;
+			edges.push_back(UEdge{ src, edge.dst });
+			adjacency[src].push_back(edge.dst);
+			adjacency[edge.dst].push_back(src);
+		}
+	}
+
+	// Give nearby vertices in a weak-component traversal the same region.
+	// Each region contains at most maxSize real instructions. Cutting every
+	// edge that crosses a region boundary therefore guarantees the hard size
+	// limit; cutting a whole endpoint group can only split regions further.
+	//
+	// Unlike partition1's repeated global trial cuts, this visits every vertex
+	// and edge only a constant number of times.
+	constexpr uint16_t noRegion = UINT16_MAX;
+	std::vector<uint16_t> region(n, noRegion);
+	std::vector<bool> seen(n, false);
+	std::vector<uint16_t> stack;
+	uint16_t nextRegion = 0;
+	for (uint16_t start = 0; start < n; ++start) {
+		if (payload[start] || seen[start])
+			continue;
+
+		stack.push_back(start);
+		seen[start] = true;
+		uint16_t regionSize = 0;
+		while (!stack.empty()) {
+			const uint16_t node = stack.back();
+			stack.pop_back();
+
+			if (regionSize == maxSize) {
+				++nextRegion;
+				regionSize = 0;
+			}
+			region[node] = nextRegion;
+			++regionSize;
+
+			for (uint16_t neighbour : adjacency[node]) {
+				if (!payload[neighbour] && !seen[neighbour]) {
+					seen[neighbour] = true;
+					stack.push_back(neighbour);
+				}
+			}
+		}
+		++nextRegion;
+	}
+
+	auto endOf = [&](const UEdge &edge) {
+		return useSrc ? edge.a : edge.b;
+	};
+	std::unordered_set<uint16_t> cutEnds;
+	for (const UEdge &edge : edges) {
+		if (region[edge.a] != region[edge.b])
+			cutEnds.insert(endOf(edge));
+	}
+	if (cutEnds.empty())
+		return B;
+
+	// Rebuild the actual components after applying endpoint-group cuts. An
+	// endpoint in B removes every edge in its group, including same-region
+	// edges that were not part of the initial traversal split.
+	UnionFind components(n);
+	for (const UEdge &edge : edges) {
+		if (!cutEnds.count(endOf(edge)))
+			components.unite(edge.a, edge.b);
+	}
+
+	std::vector<MemWrite> memWrite(n);
+	std::unordered_map<uint16_t, CompInfo> compInfo;
+	for (uint16_t i = 0; i < n; ++i) {
+		if (payload[i])
+			continue;
+		const uint16_t root = components.find(i);
+		CompInfo &info = compInfo[root];
+		memWrite[i] = memWriteOf(instructions[i], regOnlyExtFuncs);
+		markModified(instructions[i], regOnlyExtFuncs, info);
+		if (memWrite[i].heap)
+			info.modified[USED_HEAP_BIT] = true;
+		if (memWrite[i].stack)
+			info.modified[USED_STACK_BIT] = true;
+	}
+
+	for (uint16_t end : cutEnds)
+		B[end] = compInfo[components.find(end)];
+
+	return B;
+}
+
 bool CompInfo::fpuRegModified(uint8_t i)const{
 	assert(i<=10);
 	return modified[FPU_REG_BASE+i];

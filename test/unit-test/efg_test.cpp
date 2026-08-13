@@ -397,42 +397,6 @@ TEST_CASE("partition: external call in regOnlyExtFuncs is treated as register-on
 	REQUIRE(B.empty());
 }
 
-TEST_CASE("partition: cuts concentrate on a shared convergence node to minimize |B|")
-{
-	// Three independent 3-instruction chains (0-1-2, 3-4-5, 6-7-8) each
-	// end in a JA that jumps to a shared convergence node (9), which
-	// falls through to EXIT (10). With useSrc=false, end(e) for each of
-	// those three JA edges is the same node (9): cutting all three
-	// costs exactly one B entry and splits the graph into four pieces
-	// (each chain, plus {9,10}), all within maxSize. A scattered cut
-	// (e.g. one cut per chain at a different node) would also satisfy
-	// maxSize but cost 3 B entries instead of 1, so if |B| is truly
-	// minimized first, only node 9 should appear in B.
-	std::vector<ebpf_inst> instructions;
-	for (int chain = 0; chain < 3; ++chain) {
-		instructions.push_back(
-			makeInst(EBPF_OP_MOV64_IMM, 1, 0, 0, chain));
-		instructions.push_back(
-			makeInst(EBPF_OP_MOV64_IMM, 1, 0, 0, chain));
-		// JA to node 9: offset = 9 - (pc+1)
-		uint16_t pc = static_cast<uint16_t>(instructions.size());
-		instructions.push_back(makeInst(
-			EBPF_OP_JA, 0, 0,
-			static_cast<int16_t>(9 - (pc + 1)), 0));
-	}
-	instructions.push_back(makeInst(EBPF_OP_MOV64_IMM, 2, 0, 0, 0)); // 9
-	instructions.push_back(makeInst(EBPF_OP_EXIT)); // 10
-
-	REQUIRE(instructions.size() == 11);
-
-	const auto g = buildEFG(instructions);
-	const auto B = partition(g.get(), instructions, 3, false, {});
-
-	REQUIRE_FALSE(B.empty());
-	REQUIRE(B.size() == 1);
-	REQUIRE(B.count(9) == 1);
-}
-
 TEST_CASE("EFG: LDDW occupies two slots and control flow steps over the payload")
 {
 	// LDDW r1, imm64 is 16 bytes: index 1 holds the upper half of the
@@ -573,34 +537,6 @@ TEST_CASE("partition: CMPXCHG reports r0 as modified")
 			REQUIRE(info.normRegModified(0));
 		}
 	}
-}
-
-TEST_CASE("partition: goal 2 groups memory writes rather than scattering them")
-{
-	// Two stores sit adjacent in the middle of an otherwise register-only
-	// chain. Cutting so that both stores land in the same component leaves
-	// more memory-free components than splitting them apart, which is what
-	// goal 2 asks for. Whatever cut is chosen, the constraint must hold
-	// and at least one reported component must be memory-free.
-	std::vector<ebpf_inst> instructions;
-	for (int i = 0; i < 4; ++i)
-		instructions.push_back(makeInst(EBPF_OP_MOV64_IMM, 1, 0, 0, i));
-	instructions.push_back(makeInst(EBPF_OP_STXDW, 10, 2, -8, 0));
-	instructions.push_back(makeInst(EBPF_OP_STXDW, 10, 3, -16, 0));
-	for (int i = 0; i < 4; ++i)
-		instructions.push_back(makeInst(EBPF_OP_MOV64_IMM, 4, 0, 0, i));
-	instructions.push_back(makeInst(EBPF_OP_EXIT));
-
-	const auto g = buildEFG(instructions);
-	const auto B = partition(g.get(), instructions, 4, true, {});
-
-	REQUIRE_FALSE(B.empty());
-	bool sawMemFree = false;
-	for (const auto &[node, info] : B) {
-		if (!info.usedHeap() && !info.usedStack())
-			sawMemFree = true;
-	}
-	REQUIRE(sawMemFree);
 }
 
 TEST_CASE("partition: every resulting component respects maxSize")

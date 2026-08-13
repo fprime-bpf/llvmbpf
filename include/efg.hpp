@@ -64,5 +64,100 @@ Assume eBPF instructions writing to offsets relative to r10 are writing to data 
 */
 // regOnlyExtFuncs identifies external functions by the `imm` field of their
 // CALL instruction, i.e. the same index passed to register_external_function.
+/*
+## Complexity
+
+  Define:
+
+  - (n=|V|)
+  - (m=|E|)
+  - (k=|{end(e):e\in E}|), the number of endpoint groups, where
+    [
+    k\leq\min(n,m)
+    ]
+
+  - (r\leq k), the number of groups ultimately selected.
+
+  Assume average-case (O(1)) operations for unordered_map and unordered_set.
+
+  ### One evaluateCut
+
+  Union-find processes all edges and vertices:
+
+  [
+  O((m+n)\alpha(n)),
+  ]
+
+  where (\alpha(n)) is the inverse Ackermann function and is effectively constant.
+
+  In conventional simplified notation:
+
+  [
+  O(m+n).
+  ]
+
+  ### Greedy search
+
+  At round (i), approximately (k-i) candidates remain. Each candidate:
+
+  - copies a cut-edge set of up to (m) entries;
+  - evaluates all (m) edges and (n) vertices.
+
+  Thus each candidate costs:
+
+  [
+  O(m+n).
+  ]
+
+  Over (r) rounds:
+
+  # [
+  O\left((m+n)\sum_{i=0}^{r-1}(k-i)\right)
+
+  O\left((m+n)\left(rk-\frac{r(r-1)}2\right)\right).
+  ]
+
+  Therefore:
+
+  [
+  \boxed{O(rk(m+n))}
+  ]
+
+  and in the worst case (r=k):
+
+  [
+  \boxed{O(k^2(m+n))}.
+  ]
+
+  Since (k\le n), a bound using only EFG vertices and edges is:
+
+  [
+  \boxed{O(n^2(m+n))}.
+  ]
+
+  For a typical EFG with bounded out-degree, (m=O(n)), so the worst case simplifies to:
+
+  [
+  \boxed{O(n^3)}.
+  ]
+
+  Preprocessing and final metadata construction are only (O(m+n)), so the repeated candidate evaluation dominates.*/
+std::unordered_map<uint16_t,CompInfo> partition1(const G_t,const std::vector<ebpf_inst>&,uint16_t maxSize,bool useSrc, const std::unordered_set<int32_t> &regOnlyExtFuncs)noexcept;
+
+/*
+Similar to `partition1`, but uses a faster single-pass heuristic instead of
+repeatedly evaluating every possible endpoint group:
+
+1. Traverse each weak component.
+2. Divide the traversal into regions containing at most `maxSize` instructions.
+3. Select endpoint groups for edges crossing region boundaries.
+4. Recompute the resulting components and their metadata.
+
+Selecting an endpoint cuts all edges in that endpoint's group, so the final
+components may be smaller than the initial regions but can never exceed
+`maxSize`. The implementation is O(n+m) on average, assuming O(1)
+unordered-container operations. It does not optimize the two optional quality
+objectives described above.
+*/
 std::unordered_map<uint16_t,CompInfo> partition(const G_t,const std::vector<ebpf_inst>&,uint16_t maxSize,bool useSrc, const std::unordered_set<int32_t> &regOnlyExtFuncs)noexcept;
 #endif

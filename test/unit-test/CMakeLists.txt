@@ -13,6 +13,7 @@ endif()
 set(TEST_SOURCES
     bpf_prog_test.cpp
     efg_test.cpp
+    real_program_pipeline_test.cpp
     vm_test.cpp
 )
 
@@ -21,4 +22,7 @@ set_property(TARGET llvm_jit_tests PROPERTY CXX_STANDARD 20)
 add_dependencies(llvm_jit_tests llvmbpf_vm)
 target_link_libraries(llvm_jit_tests PRIVATE llvmbpf_vm Catch2::Catch2WithMain ${LIBBPF_LIBRARIES})
 target_include_directories(llvm_jit_tests PRIVATE ${Catch2_INCLUDE} ${CMAKE_CURRENT_SOURCE_DIR}/../include ${CMAKE_CURRENT_SOURCE_DIR}/../src ${LIBBPF_INCLUDE_DIRS} ${LIBBPF_INCLUDE_DIRS}/uapi)
+target_compile_definitions(llvm_jit_tests PRIVATE
+    BPF_PRIME_TEST_PROGRAM_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../../../../../tests"
+)
 add_test(NAME llvm_jit_tests COMMAND llvm_jit_tests)
