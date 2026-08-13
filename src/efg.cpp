@@ -149,19 +149,19 @@ MemWrite classifyBase(uint8_t baseReg)
 
 // Which memory regions `inst` writes to.
 //
-// A call to an external function never touches the call stack, the data
-// stack or r10 (see "../src/compiler.cpp": emitExtFuncCall only reads r1-r5
-// and stores the result into r0). It is assumed to write the heap unless
-// it's listed in `regOnlyExtFuncs`. Local calls and EXIT move r10 and the
-// call stack but write neither data stack nor heap contents; that r10
-// change is recorded by markModified() instead.
+// A call to an external function never touches the call stack or r10 (see
+// "../src/compiler.cpp": emitExtFuncCall only reads r1-r5 and stores the
+// result into r0). It is assumed to write the data stack unless it's listed
+// in `regOnlyExtFuncs`. Local calls and EXIT move r10 and the call stack but
+// write neither data stack nor heap contents; that r10 change is recorded by
+// markModified() instead.
 MemWrite memWriteOf(const ebpf_inst &inst,
 		    const std::unordered_set<int32_t> &regOnlyExtFuncs)
 {
 	if (!duo_is_fpu(inst) && isCall(inst) && !isLocalCall(inst)) {
 		const bool regOnly = regOnlyExtFuncs.find(inst.imm) !=
 				     regOnlyExtFuncs.end();
-		return MemWrite{ false, !regOnly };
+		return MemWrite{ !regOnly, false };
 	}
 
 	uint8_t baseReg = 0;
@@ -427,7 +427,84 @@ CutQuality evaluateCut(uint16_t n, const std::vector<UEdge> &edges,
 }
 
 } // namespace
+/*
+## Complexity
 
+  Define:
+
+  - (n=|V|)
+  - (m=|E|)
+  - (k=|{end(e):e\in E}|), the number of endpoint groups, where
+    [
+    k\leq\min(n,m)
+    ]
+
+  - (r\leq k), the number of groups ultimately selected.
+
+  Assume average-case (O(1)) operations for unordered_map and unordered_set.
+
+  ### One evaluateCut
+
+  Union-find processes all edges and vertices:
+
+  [
+  O((m+n)\alpha(n)),
+  ]
+
+  where (\alpha(n)) is the inverse Ackermann function and is effectively constant.
+
+  In conventional simplified notation:
+
+  [
+  O(m+n).
+  ]
+
+  ### Greedy search
+
+  At round (i), approximately (k-i) candidates remain. Each candidate:
+
+  - copies a cut-edge set of up to (m) entries;
+  - evaluates all (m) edges and (n) vertices.
+
+  Thus each candidate costs:
+
+  [
+  O(m+n).
+  ]
+
+  Over (r) rounds:
+
+  # [
+  O\left((m+n)\sum_{i=0}^{r-1}(k-i)\right)
+
+  O\left((m+n)\left(rk-\frac{r(r-1)}2\right)\right).
+  ]
+
+  Therefore:
+
+  [
+  \boxed{O(rk(m+n))}
+  ]
+
+  and in the worst case (r=k):
+
+  [
+  \boxed{O(k^2(m+n))}.
+  ]
+
+  Since (k\le n), a bound using only EFG vertices and edges is:
+
+  [
+  \boxed{O(n^2(m+n))}.
+  ]
+
+  For a typical EFG with bounded out-degree, (m=O(n)), so the worst case simplifies to:
+
+  [
+  \boxed{O(n^3)}.
+  ]
+
+  Preprocessing and final metadata construction are only (O(m+n)), so the repeated candidate evaluation dominates.*/
 std::unordered_map<uint16_t, CompInfo>
 partition1(const G_t G, const std::vector<ebpf_inst> &instructions,
 	  uint16_t maxSize, bool useSrc,

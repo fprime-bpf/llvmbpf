@@ -571,26 +571,34 @@ TEST_CASE("partition: every resulting component respects maxSize")
 	REQUIRE(static_cast<uint16_t>(instructions.size() - prev) <= maxSize);
 }
 
-TEST_CASE("partition: external call not in regOnlyExtFuncs uses the heap")
+TEST_CASE("partitioners: external call not in regOnlyExtFuncs uses the data stack")
 {
-	std::vector<ebpf_inst> instructions;
-	for (int i = 0; i < 3; ++i)
-		instructions.push_back(
-			makeInst(EBPF_OP_MOV64_IMM, 1, 0, 0, i));
-	instructions.push_back(makeInst(EBPF_OP_CALL, 0, 0, 0, 1)); // idx 3
-	for (int i = 0; i < 3; ++i)
-		instructions.push_back(
-			makeInst(EBPF_OP_MOV64_IMM, 3, 0, 0, i));
-	instructions.push_back(makeInst(EBPF_OP_EXIT));
+	const std::vector<ebpf_inst> instructions{
+		makeInst(EBPF_OP_CALL, 0, 0, 0, 1),
+		makeInst(EBPF_OP_EXIT),
+	};
 
 	const auto g = buildEFG(instructions);
-	const auto B = partition(g.get(), instructions, 3, true, {});
+	for (const auto &B : { partition(g.get(), instructions, 1, true, {}),
+			       partition1(g.get(), instructions, 1, true, {}) }) {
+		REQUIRE(B.count(0) == 1);
+		REQUIRE(B.at(0).usedStack());
+		REQUIRE_FALSE(B.at(0).usedHeap());
+	}
+}
 
-	for (const auto &[node, info] : B) {
-		if (node == 3) {
-			// An external call never touches the data stack.
-			REQUIRE(info.usedHeap());
-			REQUIRE_FALSE(info.usedStack());
-		}
+TEST_CASE("partitioners: external call in regOnlyExtFuncs uses no memory")
+{
+	const std::vector<ebpf_inst> instructions{
+		makeInst(EBPF_OP_CALL, 0, 0, 0, 9),
+		makeInst(EBPF_OP_EXIT),
+	};
+
+	const auto g = buildEFG(instructions);
+	for (const auto &B : { partition(g.get(), instructions, 1, true, { 9 }),
+			       partition1(g.get(), instructions, 1, true, { 9 }) }) {
+		REQUIRE(B.count(0) == 1);
+		REQUIRE_FALSE(B.at(0).usedStack());
+		REQUIRE_FALSE(B.at(0).usedHeap());
 	}
 }

@@ -41,7 +41,7 @@ Let `A` be all possible `E_1`. Basically, all possible sets of edges matching th
 2. Let `W` be all the weakly connected components of `P=(G,E-E_1)`. `\forall w\in W`, define `usedHeap(w)=1\equiv\exist v\in v(w), H\in type(v)`, otherwise `usedHeap(w)=0`. Define `usedStack(w)` similarily.
 Define `memFree(w)=1\equiv usedHeap(w)=0 \land usedStack(w)=0`, otherwise `memFree(w)=0`: a component is memory free iff no instruction in it writes to the data stack nor to the heap.
 Find `E_2` that maximizes `\sigma_{w\in W}memFree(w)`. The goal is to group memory operations in the least amount of partitions, so that as many components as possible need no memory (both heap and stack) snapshot at all.
-A call to external function has `usedHeap(callInst)=0` if it's in `regOnlyExtFuncs`.
+A call to external function has `usedStack(callInst)=0` if it's in `regOnlyExtFuncs`.
 
 1. `\forall e\in E`, define `end(e)\in V` to be source or destination of this edge depending on `useSrc`. 
 Find `E_2` that minimizes `|{end(e)|e\in E_2\in A}|`. The goal is to minimize the set of nodes that are sources or destinations of `E_2`. 
@@ -58,90 +58,12 @@ We only supported a limited number of external functions, they are defined in ".
 
 Call to and exit (return) from local functions will change r10 and call stack (see "../src/compiler.cpp"). 
 
-Call to external function never changes call nor data stack memory nor r10 (see "../src/compiler.cpp"): it only sets r0 as return value.
+Call to external function never changes call stack nor r10 (see "../src/compiler.cpp"): it only sets r0 as return value. However, it may write to data stack, unless specified by `regOnlyExtFuncs`.
 
 Assume eBPF instructions writing to offsets relative to r10 are writing to data stack only. Every other base register is treated as unresolved: assume such a write hits both data stack and heap. (The heap base pointer is provided as the initial value of r1, so writes relative to it are in principle heap-only, but recognising them needs dataflow that isn't implemented yet.)
 */
 // regOnlyExtFuncs identifies external functions by the `imm` field of their
 // CALL instruction, i.e. the same index passed to register_external_function.
-/*
-## Complexity
-
-  Define:
-
-  - (n=|V|)
-  - (m=|E|)
-  - (k=|{end(e):e\in E}|), the number of endpoint groups, where
-    [
-    k\leq\min(n,m)
-    ]
-
-  - (r\leq k), the number of groups ultimately selected.
-
-  Assume average-case (O(1)) operations for unordered_map and unordered_set.
-
-  ### One evaluateCut
-
-  Union-find processes all edges and vertices:
-
-  [
-  O((m+n)\alpha(n)),
-  ]
-
-  where (\alpha(n)) is the inverse Ackermann function and is effectively constant.
-
-  In conventional simplified notation:
-
-  [
-  O(m+n).
-  ]
-
-  ### Greedy search
-
-  At round (i), approximately (k-i) candidates remain. Each candidate:
-
-  - copies a cut-edge set of up to (m) entries;
-  - evaluates all (m) edges and (n) vertices.
-
-  Thus each candidate costs:
-
-  [
-  O(m+n).
-  ]
-
-  Over (r) rounds:
-
-  # [
-  O\left((m+n)\sum_{i=0}^{r-1}(k-i)\right)
-
-  O\left((m+n)\left(rk-\frac{r(r-1)}2\right)\right).
-  ]
-
-  Therefore:
-
-  [
-  \boxed{O(rk(m+n))}
-  ]
-
-  and in the worst case (r=k):
-
-  [
-  \boxed{O(k^2(m+n))}.
-  ]
-
-  Since (k\le n), a bound using only EFG vertices and edges is:
-
-  [
-  \boxed{O(n^2(m+n))}.
-  ]
-
-  For a typical EFG with bounded out-degree, (m=O(n)), so the worst case simplifies to:
-
-  [
-  \boxed{O(n^3)}.
-  ]
-
-  Preprocessing and final metadata construction are only (O(m+n)), so the repeated candidate evaluation dominates.*/
 std::unordered_map<uint16_t,CompInfo> partition1(const G_t,const std::vector<ebpf_inst>&,uint16_t maxSize,bool useSrc, const std::unordered_set<int32_t> &regOnlyExtFuncs)noexcept;
 
 /*
