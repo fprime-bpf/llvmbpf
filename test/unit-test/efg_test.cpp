@@ -602,3 +602,45 @@ TEST_CASE("partitioners: external call in regOnlyExtFuncs uses no memory")
 		REQUIRE_FALSE(B.at(0).usedHeap());
 	}
 }
+
+TEST_CASE("partition2: jumps are boundaries with metadata from snapshot side")
+{
+	std::vector<ebpf_inst> instructions{
+		makeInst(EBPF_OP_MOV64_IMM, 1, 0, 0, 1),
+		makeInst(EBPF_OP_JEQ_IMM, 1, 0, 1, 0),
+		makeInst(EBPF_OP_MOV64_IMM, 2, 0, 0, 2),
+		makeInst(EBPF_OP_EXIT),
+	};
+
+	const auto g = buildEFG(instructions);
+	const auto B = partition2(g.get(), instructions, {});
+
+	// Both the conditional jump and EXIT are snapshot boundaries.  The
+	// conditional branch snapshots before itself, so it observes r1 from
+	// its predecessor component, not r2 from the component after it.
+	REQUIRE(B.size() == 2);
+	REQUIRE(B.contains(1));
+	REQUIRE(B.contains(3));
+	REQUIRE(B.at(1).normRegModified(1));
+	REQUIRE_FALSE(B.at(1).normRegModified(2));
+	REQUIRE(B.at(3).normRegModified(2));
+}
+
+TEST_CASE("partition2: external calls snapshot after the helper")
+{
+	std::vector<ebpf_inst> instructions{
+		makeInst(EBPF_OP_MOV64_IMM, 1, 0, 0, 1),
+		makeInst(EBPF_OP_CALL, 0, 0, 0, 9),
+		makeInst(EBPF_OP_EXIT),
+	};
+
+	const auto g = buildEFG(instructions);
+	const auto B = partition2(g.get(), instructions, { 9 });
+
+	REQUIRE(B.size() == 2);
+	REQUIRE(B.contains(1));
+	REQUIRE(B.at(1).normRegModified(0));
+	REQUIRE(B.at(1).normRegModified(1));
+	REQUIRE_FALSE(B.at(1).usedStack());
+	REQUIRE_FALSE(B.at(1).usedHeap());
+}

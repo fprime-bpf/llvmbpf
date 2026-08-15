@@ -642,6 +642,103 @@ partition1(const G_t G, const std::vector<ebpf_inst> &instructions,
 }
 
 std::unordered_map<uint16_t, CompInfo>
+partition2(const G_t G, const std::vector<ebpf_inst> &instructions,
+	   const std::unordered_set<int32_t> &regOnlyExtFuncs) noexcept
+{
+	const uint16_t n = static_cast<uint16_t>(instructions.size());
+	std::unordered_map<uint16_t, CompInfo> B;
+	if (n == 0)
+		return B;
+
+	const std::vector<bool> payload = lddwPayloadSlots(instructions);
+	std::vector<bool> isBoundary(n, false);
+	std::vector<bool> snapshotBefore(n, false);
+	for (uint16_t pc = 0; pc < n; ++pc) {
+		if (payload[pc])
+			continue;
+
+		const ebpf_inst &inst = instructions[pc];
+		if (isCondJump(inst)) {
+			// compiler.cpp emits a conditional-branch snapshot before
+			// evaluating the branch.
+			isBoundary[pc] = true;
+			snapshotBefore[pc] = true;
+		} else if (isJa(inst) || isExit(inst) || isLocalCall(inst)) {
+			// These control transfers are likewise snapshotted before their
+			// state-changing operation (if any).
+			isBoundary[pc] = true;
+			snapshotBefore[pc] = true;
+		} else if (isCall(inst)) {
+			// An external helper call is snapshotted after it returns, so
+			// its outgoing edge, rather than its incoming edge, is cut.
+			isBoundary[pc] = true;
+		}
+	}
+
+	std::vector<UEdge> edges;
+	std::vector<bool> cut;
+	for (uint16_t src = 0; src < n; ++src) {
+		if (payload[src])
+			continue;
+		for (const Edge &edge : G[src]) {
+			if (edge.dst >= n || payload[edge.dst] || edge.dst == src)
+				continue;
+			edges.push_back(UEdge{ src, edge.dst });
+			cut.push_back((snapshotBefore[edge.dst] &&
+				       isBoundary[edge.dst]) ||
+				      (!snapshotBefore[src] && isBoundary[src]));
+		}
+	}
+
+	// Components model the state accumulated between snapshots.
+	UnionFind components(n);
+	for (std::size_t i = 0; i < edges.size(); ++i) {
+		if (!cut[i])
+			components.unite(edges[i].a, edges[i].b);
+	}
+
+	std::vector<MemWrite> memWrite(n);
+	std::unordered_map<uint16_t, CompInfo> compInfo;
+	for (uint16_t pc = 0; pc < n; ++pc) {
+		if (payload[pc])
+			continue;
+		CompInfo &info = compInfo[components.find(pc)];
+		memWrite[pc] = memWriteOf(instructions[pc], regOnlyExtFuncs);
+		markModified(instructions[pc], regOnlyExtFuncs, info);
+		if (memWrite[pc].heap)
+			info.modified[USED_HEAP_BIT] = true;
+		if (memWrite[pc].stack)
+			info.modified[USED_STACK_BIT] = true;
+	}
+
+	for (uint16_t pc = 0; pc < n; ++pc) {
+		if (!isBoundary[pc])
+			continue;
+
+		if (!snapshotBefore[pc]) {
+			// External calls snapshot after the call, so the component
+			// containing the call has exactly the state to save.
+			B.emplace(pc, compInfo[components.find(pc)]);
+			continue;
+		}
+
+		// A before-instruction snapshot must contain changes made on every
+		// predecessor path.  Incoming edges were cut above, so combine the
+		// metadata of each predecessor component rather than that of `pc`'s
+		// following component.
+		CompInfo info;
+		for (std::size_t i = 0; i < edges.size(); ++i) {
+			if (cut[i] && edges[i].b == pc)
+				info.modified |=
+					compInfo[components.find(edges[i].a)].modified;
+		}
+		B.emplace(pc, info);
+	}
+
+	return B;
+}
+
+std::unordered_map<uint16_t, CompInfo>
 partition(const G_t G, const std::vector<ebpf_inst> &instructions,
 	  uint16_t maxSize, bool useSrc,
 	  const std::unordered_set<int32_t> &regOnlyExtFuncs) noexcept

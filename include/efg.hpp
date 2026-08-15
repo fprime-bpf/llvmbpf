@@ -67,6 +67,14 @@ Assume eBPF instructions writing to offsets relative to r10 are writing to data 
 std::unordered_map<uint16_t,CompInfo> partition1(const G_t,const std::vector<ebpf_inst>&,uint16_t maxSize,bool useSrc, const std::unordered_set<int32_t> &regOnlyExtFuncs)noexcept;
 
 /*
+Another mode for partitioning. The returned map is simply the set of all jump instructions (including calls and exits). 
+Compute `CompInfo` on the graph after deleting the below sets of edges: (1) For conditional jumps, remove incoming edges to it. (2) For non conditional
+jumps (including calls and exits), remove either incoming or outgoing edges, based on where `llvmbpf_vm::compileWithSS` inserts snapshots
+relative to these instructions.
+*/
+std::unordered_map<uint16_t,CompInfo> partition2(const G_t,const std::vector<ebpf_inst>&, const std::unordered_set<int32_t> &regOnlyExtFuncs)noexcept;
+
+/*
 Similar to `partition1`, but uses a faster single-pass heuristic instead of
 repeatedly evaluating every possible endpoint group:
 
