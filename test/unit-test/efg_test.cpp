@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include <efg.hpp>
 #include <fpu_inst.h>
@@ -643,4 +644,112 @@ TEST_CASE("partition2: external calls snapshot after the helper")
 	REQUIRE(B.at(1).normRegModified(1));
 	REQUIRE_FALSE(B.at(1).usedStack());
 	REQUIRE_FALSE(B.at(1).usedHeap());
+}
+
+TEST_CASE("metrics: component statistics use linear interpolation and population deviation")
+{
+	std::vector<ebpf_inst> instructions{
+		makeInst(EBPF_OP_MOV64_IMM, 0, 0, 0, 0),
+		makeInst(EBPF_OP_MOV64_IMM, 0, 0, 0, 0),
+		makeInst(EBPF_OP_EXIT),
+	};
+	auto graph = std::make_unique<G_t>(instructions.size());
+	// Component sizes are [1, 2].
+	graph[1].push_back(Edge{ 2, Normal });
+
+	const EFGStat stat = metrics(graph.get(), instructions, {});
+
+	REQUIRE(stat.minCompSize == 1);
+	REQUIRE(stat.maxCompSize == 2);
+	REQUIRE(stat.compSizeIQR[0] == Catch::Approx(1.25));
+	REQUIRE(stat.compSizeIQR[1] == Catch::Approx(1.50));
+	REQUIRE(stat.compSizeIQR[2] == Catch::Approx(1.75));
+	REQUIRE(stat.meanCompSize == Catch::Approx(1.5));
+	REQUIRE(stat.compSizeStdDev == Catch::Approx(0.5));
+	REQUIRE(stat.longestTrailBetweenBoundary == 0);
+	REQUIRE(stat.toString().find("populationStdDev=0.5") !=
+		std::string::npos);
+}
+
+TEST_CASE("metrics: longest trail goes around a loop exactly once")
+{
+	std::vector<ebpf_inst> instructions{
+		makeInst(EBPF_OP_MOV64_IMM),       // 0: entry
+		makeInst(EBPF_OP_JEQ_IMM),         // 1: before boundary
+		makeInst(EBPF_OP_JEQ_IMM),         // 2: loop choice
+		makeInst(EBPF_OP_MOV64_IMM),       // 3: after boundary
+		makeInst(EBPF_OP_MOV64_IMM),       // 4
+		makeInst(EBPF_OP_JA),              // 5: loop back
+		makeInst(EBPF_OP_EXIT),            // 6: terminal exit
+	};
+	auto graph = std::make_unique<G_t>(instructions.size());
+	graph[0].push_back(Edge{ 1, Normal });
+	graph[1].push_back(Edge{ 2, Cond0 });
+	graph[2].push_back(Edge{ 3, Cond0 });
+	graph[2].push_back(Edge{ 4, Cond1 });
+	graph[4].push_back(Edge{ 5, Normal });
+	graph[5].push_back(Edge{ 2, Uncond });
+	graph[3].push_back(Edge{ 6, Normal });
+
+	std::unordered_map<uint16_t, CompInfo> boundaries{
+		{ 1, CompInfo{} },
+		{ 3, CompInfo{} },
+	};
+	const EFGStat stat = metrics(graph.get(), instructions, boundaries);
+
+	// 1 -> 2 -> 4 -> 5 -> 2 -> 3. Reusing vertex 2 is allowed;
+	// reusing an edge is not.
+	REQUIRE(stat.longestTrailBetweenBoundary == 5);
+	REQUIRE(stat.maxCompSize == 5);
+}
+
+TEST_CASE("metrics: trails must belong to an entry-to-exit walk")
+{
+	std::vector<ebpf_inst> instructions{
+		makeInst(EBPF_OP_MOV64_IMM), // 0: reachable entry
+		makeInst(EBPF_OP_JEQ_IMM),   // 1: reachable start boundary
+		makeInst(EBPF_OP_MOV64_IMM), // 2: reachable end boundary
+		makeInst(EBPF_OP_EXIT),      // 3: reachable exit
+		makeInst(EBPF_OP_JEQ_IMM),   // 4: unreachable start boundary
+		makeInst(EBPF_OP_MOV64_IMM), // 5
+		makeInst(EBPF_OP_MOV64_IMM), // 6: unreachable end boundary
+		makeInst(EBPF_OP_EXIT),      // 7: unreachable exit
+	};
+	auto graph = std::make_unique<G_t>(instructions.size());
+	graph[0].push_back(Edge{ 1, Normal });
+	graph[1].push_back(Edge{ 2, Cond0 });
+	graph[2].push_back(Edge{ 3, Normal });
+	graph[4].push_back(Edge{ 5, Cond0 });
+	graph[5].push_back(Edge{ 6, Normal });
+	graph[6].push_back(Edge{ 7, Normal });
+
+	std::unordered_map<uint16_t, CompInfo> boundaries{
+		{ 1, CompInfo{} },
+		{ 2, CompInfo{} },
+		{ 4, CompInfo{} },
+		{ 6, CompInfo{} },
+	};
+	const EFGStat stat = metrics(graph.get(), instructions, boundaries);
+
+	// The unreachable 4 -> 5 -> 6 trail is longer, but cannot occur in a
+	// complete execution beginning at instruction zero.
+	REQUIRE(stat.longestTrailBetweenBoundary == 1);
+}
+
+TEST_CASE("metrics: one boundary vertex admits the empty trail")
+{
+	std::vector<ebpf_inst> instructions{
+		makeInst(EBPF_OP_MOV64_IMM),
+		makeInst(EBPF_OP_JEQ_IMM),
+		makeInst(EBPF_OP_EXIT),
+	};
+	auto graph = std::make_unique<G_t>(instructions.size());
+	graph[0].push_back(Edge{ 1, Normal });
+	graph[1].push_back(Edge{ 2, Cond0 });
+
+	std::unordered_map<uint16_t, CompInfo> boundaries{
+		{ 1, CompInfo{} },
+	};
+	REQUIRE(metrics(graph.get(), instructions, boundaries)
+			.longestTrailBetweenBoundary == 0);
 }

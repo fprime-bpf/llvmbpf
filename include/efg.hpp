@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include<bitset>
+#include <string>
 
 #include <ebpf_inst.h>
 enum FlowType:uint8_t{
@@ -52,8 +53,6 @@ The graph is produced by `buildEFG`, you may leverage special properties of it.
 Return `B={end(e)|e\in \hat{E_2}}\subseteq V`. The keys in map will be the instructions(nodes) in B, values indicate whether it lives in a register-only component and what registers do instructions in this component modify (treat call to external functions to only modify r0).
 */
 /*
-The following external functions are considered register only: bpf_math_sqrt, bpf_math_sin, bpf_math_cos, bpf_math_atan2.
-
 We only supported a limited number of external functions, they are defined in "../../iter_bpf_helpers.cpp" and "../../maps/map_bpf_helpers.cpp"
 
 Call to and exit (return) from local functions will change r10 and call stack (see "../src/compiler.cpp"). 
@@ -90,4 +89,51 @@ unordered-container operations. It does not optimize the two optional quality
 objectives described above.
 */
 std::unordered_map<uint16_t,CompInfo> partition(const G_t,const std::vector<ebpf_inst>&,uint16_t maxSize,bool useSrc, const std::unordered_set<int32_t> &regOnlyExtFuncs)noexcept;
+
+struct EFGStat{
+    //statistics for each weakly connected component.
+    uint16_t maxCompSize,minCompSize;
+    // Q1, median, and Q3, using linear interpolation at (N-1)*p.
+    double compSizeIQR[3];
+    float meanCompSize,compSizeStdDev;
+
+    /*
+    A trail is a walk that doesn't have repeated edges, but may have repeated vertices. Here, the graph is produced by
+    `buildEFG`. The length is number of edges in the trail.
+    */
+    // An EFG can have almost twice as many edges as instructions, so this
+    // must be wider than the uint16_t instruction index type.
+    uint32_t longestTrailBetweenBoundary;
+
+    std::string toString()const noexcept;
+};
+/*
+Compute metrics of a partitioned EFG. `boundary` are the information produced by `partition*` functions and passed to ``llvmbpf_vm::compileWithSS``. Therefore,
+for each instruction (vertex) in `boundary` remove either incoming or outgoing edges based on where `compileWithSS` inserts snapshots (like `partition2`). For
+example, if a snapshot is inserted after an instruction, then remove outgoing edges.
+
+`longestTrailBetweenBoundary` is the longest trail between any 2 vertices (instructions) in boundary. The 2 vertices may be the same, and the trail is directed.
+Only trails that can be embedded in an entry-to-terminal-EXIT walk are counted, as determined by EFG reachability (data-dependent branch feasibility is not represented by the EFG).
+*/
+/*
+Computing longest trail is a NP problem in general. However, you should take full advantage of unique properties of the graph here.
+Here are some of my insights, but they may be wrong.
+(1) After removing edges according to instructions above, the graph are split into weakly connected components. 2 vertices can
+only have a trail between them if they live in the same component.
+(2) The goal of using trail instead of path is to handle the following case. Suppose there's a loop `1->{2,100}->3, 100->101->{2,100}`.
+I want [1,2,100,101,2,3] instead of [1,2,3]. In other words, go around the loop once; or, equivalently, don't shrink loops.
+(3) This function will be applied to eBPF programs in "/home/cw3723/bpf-prime/tests/". Notice that none of them uses local eBPF functions.
+Therefore, the max out degree of any vertex is at most 2 (conditional jumps). In fact, I expect the average out degree to be close to 1. Also,
+if you inspect, these programs don't have many eBPF instructions to begin with. The max number of instructions, as I recall, is around 25000.
+(4) The eBPF programs are assumed to terminate, so, starting from entry instruction, walks are only valid if it can reach the last `exit`.
+The trails I'm interested in should be part of one such walks.
+(5) Since these are eBPF programs, you might be able to do some control flow analysis to massively shrink the graph size. Since within
+each control flow block the execution flow is fixed.
+(6) This is really a helper function. It's not use in the jit compilation and execution pipeline. Therefore, you are allowed to use
+parallization.
+
+Important: regardless of what optimizations you did, make sure your optimization is correct and still produces exact results. I do not want
+any sort of approximations. I want the exact longest trail length as described above.
+*/
+EFGStat metrics(const G_t,const std::vector<ebpf_inst>&,const std::unordered_map<uint16_t,CompInfo>&boundary/*only keys are needed, values are unnecesary for our analysis*/)noexcept;
 #endif

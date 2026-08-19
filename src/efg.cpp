@@ -4,11 +4,16 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
+#include <cstdio>
 #include <cstdint>
+#include <limits>
 #include <numeric>
+#include <queue>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace
@@ -855,4 +860,478 @@ bool CompInfo::usedHeap()const noexcept{
 }
 bool CompInfo::usedStack()const noexcept{
 	return modified[USED_STACK_BIT];
+}
+
+namespace
+{
+
+// compileWithSS snapshots control transfers before executing them. Ordinary
+// instructions and external helper calls are snapshotted after they execute.
+// Consequently a before-snapshot removes incoming EFG edges, while an
+// after-snapshot removes outgoing edges.
+bool snapshotBefore(const ebpf_inst &inst)
+{
+	return isCondJump(inst) || isJa(inst) || isExit(inst) ||
+	       isLocalCall(inst);
+}
+
+struct DirectedEdge {
+	uint16_t src;
+	uint16_t dst;
+};
+
+struct TrailState {
+	uint16_t node;
+	uint64_t used;
+
+	bool operator==(const TrailState &) const = default;
+};
+
+struct TrailStateHash {
+	std::size_t operator()(const TrailState &state) const noexcept
+	{
+		const std::size_t h1 = std::hash<uint64_t>{}(state.used);
+		const std::size_t h2 = std::hash<uint16_t>{}(state.node);
+		return h1 ^ (h2 + 0x9e3779b9U + (h1 << 6) + (h1 >> 2));
+	}
+};
+
+struct CompressedEdge {
+	uint16_t dst;
+	uint32_t length;
+	std::size_t id;
+};
+
+// Find the exact longest internal trail from `start` to every compressed
+// vertex. Vertices may repeat, but compressed edges may not. For at most 64
+// edges, memoising (vertex, used-edge-set) avoids evaluating the same exact
+// residual problem more than once. Larger components use the same exhaustive
+// search without memoisation; there is deliberately no heuristic cutoff.
+std::vector<uint32_t> longestCompressedTrails(
+	const std::vector<std::vector<CompressedEdge> > &adjacency,
+	std::size_t edgeCount, uint16_t start)
+{
+	std::vector<uint32_t> best(adjacency.size(), 0);
+	std::vector<bool> reached(adjacency.size(), false);
+	std::vector<bool> used(edgeCount, false);
+	const bool useMask = edgeCount <= 64;
+	std::unordered_set<TrailState, TrailStateHash> seen;
+	if (useMask)
+		seen.insert(TrailState{ start, 0 });
+
+	struct Frame {
+		uint16_t node;
+		std::size_t next;
+		uint32_t length;
+		std::size_t incoming;
+		uint64_t mask;
+	};
+	constexpr std::size_t noEdge = std::numeric_limits<std::size_t>::max();
+	std::vector<Frame> stack;
+	stack.push_back(Frame{ start, 0, 0, noEdge, 0 });
+	reached[start] = true;
+
+	while (!stack.empty()) {
+		Frame &frame = stack.back();
+		if (frame.next == adjacency[frame.node].size()) {
+			const std::size_t incoming = frame.incoming;
+			stack.pop_back();
+			if (incoming != noEdge)
+				used[incoming] = false;
+			continue;
+		}
+
+		const CompressedEdge edge = adjacency[frame.node][frame.next++];
+		if (used[edge.id])
+			continue;
+
+		const uint64_t nextMask =
+			useMask ? frame.mask | (uint64_t{ 1 } << edge.id) : 0;
+		if (useMask &&
+		    !seen.insert(TrailState{ edge.dst, nextMask }).second)
+			continue;
+
+		used[edge.id] = true;
+		const uint32_t nextLength = frame.length + edge.length;
+		reached[edge.dst] = true;
+		best[edge.dst] = std::max(best[edge.dst], nextLength);
+		stack.push_back(
+			Frame{ edge.dst, 0, nextLength, edge.id, nextMask });
+	}
+
+	// UINT32_MAX denotes an unreachable target. Zero remains a valid exact
+	// answer for start-to-start, including when the two boundary vertices are
+	// the same.
+	for (std::size_t i = 0; i < best.size(); ++i) {
+		if (!reached[i])
+			best[i] = UINT32_MAX;
+	}
+	return best;
+}
+
+// Exact longest boundary-to-boundary trail in the cut graph. Only vertices
+// and edges that can lie on a structural entry-to-terminal-EXIT execution are
+// admitted. This is the strongest property the EFG can establish without
+// solving data-dependent branch conditions.
+uint32_t exactLongestTrail(
+	uint16_t n, const G_t G, const std::vector<ebpf_inst> &instructions,
+	const std::vector<bool> &payload,
+	const std::unordered_map<uint16_t, CompInfo> &boundary,
+	const std::vector<DirectedEdge> &cutGraphEdges)
+{
+	if (n == 0 || boundary.empty())
+		return 0;
+
+	// First identify the part of the original (uncut) EFG that belongs to
+	// some entry-to-terminal-exit walk.
+	std::vector<std::vector<uint16_t> > originalAdj(n), originalReverse(n);
+	for (uint16_t src = 0; src < n; ++src) {
+		if (payload[src])
+			continue;
+		for (const Edge &edge : G[src]) {
+			if (edge.dst >= n || payload[edge.dst])
+				continue;
+			originalAdj[src].push_back(edge.dst);
+			originalReverse[edge.dst].push_back(src);
+		}
+	}
+
+	std::vector<bool> reachable(n, false), reachesExit(n, false);
+	std::vector<uint16_t> work;
+	if (!payload[0]) {
+		reachable[0] = true;
+		work.push_back(0);
+	}
+	while (!work.empty()) {
+		const uint16_t node = work.back();
+		work.pop_back();
+		for (uint16_t dst : originalAdj[node]) {
+			if (!reachable[dst]) {
+				reachable[dst] = true;
+				work.push_back(dst);
+			}
+		}
+	}
+
+	for (uint16_t pc = 0; pc < n; ++pc) {
+		if (!payload[pc] && isExit(instructions[pc]) &&
+		    originalAdj[pc].empty()) {
+			reachesExit[pc] = true;
+			work.push_back(pc);
+		}
+	}
+	while (!work.empty()) {
+		const uint16_t node = work.back();
+		work.pop_back();
+		for (uint16_t src : originalReverse[node]) {
+			if (!reachesExit[src]) {
+				reachesExit[src] = true;
+				work.push_back(src);
+			}
+		}
+	}
+
+	std::vector<bool> live(n, false);
+	for (uint16_t pc = 0; pc < n; ++pc)
+		live[pc] = reachable[pc] && reachesExit[pc] && !payload[pc];
+
+	std::vector<std::vector<uint16_t> > adjacency(n), reverse(n);
+	std::vector<DirectedEdge> liveEdges;
+	for (const DirectedEdge &edge : cutGraphEdges) {
+		if (!live[edge.src] || !live[edge.dst])
+			continue;
+		adjacency[edge.src].push_back(edge.dst);
+		reverse[edge.dst].push_back(edge.src);
+		liveEdges.push_back(edge);
+	}
+
+	// Kosaraju's algorithm, written iteratively so a 65K-instruction linear
+	// program cannot overflow the native call stack.
+	std::vector<bool> visited(n, false);
+	std::vector<uint16_t> finishOrder;
+	struct DfsFrame {
+		uint16_t node;
+		std::size_t next;
+	};
+	for (uint16_t start = 0; start < n; ++start) {
+		if (!live[start] || visited[start])
+			continue;
+		std::vector<DfsFrame> dfs;
+		visited[start] = true;
+		dfs.push_back(DfsFrame{ start, 0 });
+		while (!dfs.empty()) {
+			DfsFrame &frame = dfs.back();
+			if (frame.next < adjacency[frame.node].size()) {
+				const uint16_t dst =
+					adjacency[frame.node][frame.next++];
+				if (!visited[dst]) {
+					visited[dst] = true;
+					dfs.push_back(DfsFrame{ dst, 0 });
+				}
+			} else {
+				finishOrder.push_back(frame.node);
+				dfs.pop_back();
+			}
+		}
+	}
+
+	constexpr uint16_t noComponent = UINT16_MAX;
+	std::vector<uint16_t> component(n, noComponent);
+	uint16_t componentCount = 0;
+	for (auto it = finishOrder.rbegin(); it != finishOrder.rend(); ++it) {
+		const uint16_t start = *it;
+		if (component[start] != noComponent)
+			continue;
+		component[start] = componentCount;
+		work.push_back(start);
+		while (!work.empty()) {
+			const uint16_t node = work.back();
+			work.pop_back();
+			for (uint16_t src : reverse[node]) {
+				if (component[src] == noComponent) {
+					component[src] = componentCount;
+					work.push_back(src);
+				}
+			}
+		}
+		++componentCount;
+	}
+
+	std::vector<std::vector<uint16_t> > members(componentCount);
+	std::vector<std::vector<DirectedEdge> > internalAdj(n);
+	std::vector<uint32_t> internalIn(n, 0);
+	std::vector<std::vector<DirectedEdge> > crossOut(n);
+	std::vector<std::vector<uint16_t> > componentOut(componentCount);
+	std::vector<uint32_t> indegree(componentCount, 0);
+	std::vector<bool> possibleEntry(n, false), possibleExit(n, false);
+	for (uint16_t pc = 0; pc < n; ++pc) {
+		if (live[pc])
+			members[component[pc]].push_back(pc);
+		if (live[pc] && boundary.contains(pc)) {
+			possibleEntry[pc] = true;
+			possibleExit[pc] = true;
+		}
+	}
+	for (const DirectedEdge &edge : liveEdges) {
+		if (component[edge.src] == component[edge.dst]) {
+			internalAdj[edge.src].push_back(edge);
+			++internalIn[edge.dst];
+		} else {
+			crossOut[edge.src].push_back(edge);
+			componentOut[component[edge.src]].push_back(
+				component[edge.dst]);
+			++indegree[component[edge.dst]];
+			possibleExit[edge.src] = true;
+			possibleEntry[edge.dst] = true;
+		}
+	}
+
+	std::queue<uint16_t> ready;
+	for (uint16_t c = 0; c < componentCount; ++c) {
+		if (indegree[c] == 0)
+			ready.push(c);
+	}
+
+	constexpr int64_t unreachable = -1;
+	std::vector<int64_t> arrival(n, unreachable);
+	std::vector<bool> critical(n, false);
+	std::vector<uint16_t> criticalIndex(n, UINT16_MAX);
+	uint32_t answer = 0;
+	for (const auto &[pc, info] : boundary) {
+		(void)info;
+		if (pc < n && live[pc]) {
+			arrival[pc] = 0;
+			// The endpoints may be the same, so the empty trail counts.
+			answer = 0;
+		}
+	}
+
+	while (!ready.empty()) {
+		const uint16_t c = ready.front();
+		ready.pop();
+
+		bool hasArrival = false;
+		for (uint16_t node : members[c])
+			hasArrival = hasArrival || arrival[node] != unreachable;
+
+		if (hasArrival) {
+			// Collapse every forced 1-in/1-out chain into one weighted edge.
+			// Ports and branch/join vertices stay explicit, which preserves
+			// every possible trail endpoint and every edge-use choice.
+			std::vector<uint16_t> criticalNodes;
+			for (uint16_t node : members[c]) {
+				critical[node] = possibleEntry[node] ||
+						 possibleExit[node] ||
+						 internalIn[node] != 1 ||
+						 internalAdj[node].size() != 1;
+				if (critical[node])
+					criticalNodes.push_back(node);
+			}
+
+			// A processed component has an arrival port, hence at least one
+			// critical vertex even when the SCC itself is a simple cycle.
+			assert(!criticalNodes.empty());
+			for (uint16_t i = 0; i < criticalNodes.size(); ++i)
+				criticalIndex[criticalNodes[i]] = i;
+
+			std::vector<std::vector<CompressedEdge> > compressed(
+				criticalNodes.size());
+			std::size_t compressedEdgeCount = 0;
+			for (uint16_t node : criticalNodes) {
+				for (const DirectedEdge &first : internalAdj[node]) {
+					uint16_t dst = first.dst;
+					uint32_t length = 1;
+					while (!critical[dst]) {
+						assert(internalAdj[dst].size() == 1);
+						dst = internalAdj[dst][0].dst;
+						++length;
+					}
+					compressed[criticalIndex[node]].push_back(
+						CompressedEdge{ criticalIndex[dst], length,
+								compressedEdgeCount++ });
+				}
+			}
+
+			for (uint16_t start : criticalNodes) {
+				if (arrival[start] == unreachable)
+					continue;
+				const auto distances = longestCompressedTrails(
+					compressed, compressedEdgeCount,
+					criticalIndex[start]);
+				for (uint16_t exit : criticalNodes) {
+					const uint32_t distance =
+						distances[criticalIndex[exit]];
+					if (distance == UINT32_MAX)
+						continue;
+					const uint64_t score =
+						static_cast<uint64_t>(arrival[start]) +
+						distance;
+					assert(score <= UINT32_MAX);
+					if (boundary.contains(exit))
+						answer = std::max(
+							answer,
+							static_cast<uint32_t>(score));
+					for (const DirectedEdge &edge : crossOut[exit]) {
+						const int64_t next =
+							static_cast<int64_t>(score + 1);
+						arrival[edge.dst] =
+							std::max(arrival[edge.dst], next);
+					}
+				}
+			}
+		}
+
+		for (uint16_t dst : componentOut[c]) {
+			assert(indegree[dst] > 0);
+			if (--indegree[dst] == 0)
+				ready.push(dst);
+		}
+	}
+
+	return answer;
+}
+
+double interpolatedQuantile(const std::vector<uint16_t> &sorted, double p)
+{
+	if (sorted.empty())
+		return 0.0;
+	const double position = p * static_cast<double>(sorted.size() - 1);
+	const std::size_t lower = static_cast<std::size_t>(position);
+	const std::size_t upper = std::min(lower + 1, sorted.size() - 1);
+	const double fraction = position - static_cast<double>(lower);
+	return static_cast<double>(sorted[lower]) * (1.0 - fraction) +
+	       static_cast<double>(sorted[upper]) * fraction;
+}
+
+} // namespace
+
+EFGStat metrics(const G_t G, const std::vector<ebpf_inst> &instructions,
+		const std::unordered_map<uint16_t, CompInfo> &boundary) noexcept
+{
+	EFGStat stat{};
+	{
+		const uint16_t n = static_cast<uint16_t>(instructions.size());
+		if (n == 0)
+			return stat;
+		const std::vector<bool> payload = lddwPayloadSlots(instructions);
+		std::vector<DirectedEdge> remainingEdges;
+		UnionFind components(n);
+		for (uint16_t src = 0; src < n; ++src) {
+			if (payload[src])
+				continue;
+			for (const Edge &edge : G[src]) {
+				if (edge.dst >= n || payload[edge.dst])
+					continue;
+				const bool cutIncoming =
+					boundary.contains(edge.dst) &&
+					snapshotBefore(instructions[edge.dst]);
+				const bool cutOutgoing = boundary.contains(src) &&
+						 !snapshotBefore(instructions[src]);
+				if (cutIncoming || cutOutgoing)
+					continue;
+				remainingEdges.push_back(DirectedEdge{ src, edge.dst });
+				components.unite(src, edge.dst);
+			}
+		}
+
+		std::unordered_map<uint16_t, uint16_t> componentSizes;
+		for (uint16_t pc = 0; pc < n; ++pc) {
+			if (!payload[pc])
+				++componentSizes[components.find(pc)];
+		}
+		std::vector<uint16_t> sizes;
+		sizes.reserve(componentSizes.size());
+		for (const auto &[root, size] : componentSizes) {
+			(void)root;
+			sizes.push_back(size);
+		}
+		std::sort(sizes.begin(), sizes.end());
+		if (!sizes.empty()) {
+			stat.minCompSize = sizes.front();
+			stat.maxCompSize = sizes.back();
+			stat.compSizeIQR[0] = interpolatedQuantile(sizes, 0.25);
+			stat.compSizeIQR[1] = interpolatedQuantile(sizes, 0.50);
+			stat.compSizeIQR[2] = interpolatedQuantile(sizes, 0.75);
+
+			const double sum = std::accumulate(
+				sizes.begin(), sizes.end(), 0.0);
+			const double mean = sum / static_cast<double>(sizes.size());
+			double squaredDeviation = 0.0;
+			for (uint16_t size : sizes) {
+				const double delta = static_cast<double>(size) - mean;
+				squaredDeviation += delta * delta;
+			}
+			stat.meanCompSize = static_cast<float>(mean);
+			stat.compSizeStdDev = static_cast<float>(std::sqrt(
+				squaredDeviation / static_cast<double>(sizes.size())));
+		}
+
+		stat.longestTrailBetweenBoundary = exactLongestTrail(
+			n, G, instructions, payload, boundary, remainingEdges);
+	}
+	return stat;
+}
+
+std::string EFGStat::toString() const noexcept
+{
+	try {
+		char buffer[512];
+		const int written = std::snprintf(
+			buffer, sizeof(buffer),
+			"EFGStat{componentSize={min=%u, q1=%.6g, median=%.6g, "
+			"q3=%.6g, max=%u, mean=%.6g, populationStdDev=%.6g}, "
+			"longestTrailBetweenBoundary=%u}",
+			static_cast<unsigned>(minCompSize), compSizeIQR[0],
+			compSizeIQR[1], compSizeIQR[2],
+			static_cast<unsigned>(maxCompSize),
+			static_cast<double>(meanCompSize),
+			static_cast<double>(compSizeStdDev),
+			static_cast<unsigned>(longestTrailBetweenBoundary));
+		if (written < 0)
+			return {};
+		return std::string(buffer,
+				   std::min<std::size_t>(written, sizeof(buffer) - 1));
+	} catch (...) {
+		return {};
+	}
 }
