@@ -909,7 +909,8 @@ struct CompressedEdge {
 // search without memoisation; there is deliberately no heuristic cutoff.
 std::vector<uint32_t> longestCompressedTrails(
 	const std::vector<std::vector<CompressedEdge> > &adjacency,
-	std::size_t edgeCount, uint16_t start)
+	std::size_t edgeCount, uint16_t start,
+	const std::vector<bool> &boundaryVertex)
 {
 	std::vector<uint32_t> best(adjacency.size(), 0);
 	std::vector<bool> reached(adjacency.size(), false);
@@ -933,7 +934,12 @@ std::vector<uint32_t> longestCompressedTrails(
 
 	while (!stack.empty()) {
 		Frame &frame = stack.back();
-		if (frame.next == adjacency[frame.node].size()) {
+		// A boundary may start a fresh trail, but once a trail reaches any
+		// boundary (including returning to its start), that boundary is its
+		// endpoint and the trail must not continue through it.
+		const bool reachedBoundary =
+			boundaryVertex[frame.node] && frame.length != 0;
+		if (reachedBoundary || frame.next == adjacency[frame.node].size()) {
 			const std::size_t incoming = frame.incoming;
 			stack.pop_back();
 			if (incoming != noEdge)
@@ -969,15 +975,15 @@ std::vector<uint32_t> longestCompressedTrails(
 	return best;
 }
 
-// Exact longest boundary-to-boundary trail in the cut graph. Only vertices
+// Exact longest boundary-to-boundary trail in the original EFG. Only vertices
 // and edges that can lie on a structural entry-to-terminal-EXIT execution are
-// admitted. This is the strongest property the EFG can establish without
-// solving data-dependent branch conditions.
+// admitted, and a trail stops at the first boundary it reaches. This is the
+// strongest property the EFG can establish without solving data-dependent
+// branch conditions.
 uint32_t exactLongestTrail(
 	uint16_t n, const G_t G, const std::vector<ebpf_inst> &instructions,
 	const std::vector<bool> &payload,
-	const std::unordered_map<uint16_t, CompInfo> &boundary,
-	const std::vector<DirectedEdge> &cutGraphEdges)
+	const std::unordered_map<uint16_t, CompInfo> &boundary)
 {
 	if (n == 0 || boundary.empty())
 		return 0;
@@ -1037,12 +1043,16 @@ uint32_t exactLongestTrail(
 
 	std::vector<std::vector<uint16_t> > adjacency(n), reverse(n);
 	std::vector<DirectedEdge> liveEdges;
-	for (const DirectedEdge &edge : cutGraphEdges) {
-		if (!live[edge.src] || !live[edge.dst])
+	for (uint16_t src = 0; src < n; ++src) {
+		if (!live[src])
 			continue;
-		adjacency[edge.src].push_back(edge.dst);
-		reverse[edge.dst].push_back(edge.src);
-		liveEdges.push_back(edge);
+		for (uint16_t dst : originalAdj[src]) {
+			if (!live[dst])
+				continue;
+			adjacency[src].push_back(dst);
+			reverse[dst].push_back(src);
+			liveEdges.push_back(DirectedEdge{ src, dst });
+		}
 	}
 
 	// Kosaraju's algorithm, written iteratively so a 65K-instruction linear
@@ -1176,8 +1186,11 @@ uint32_t exactLongestTrail(
 
 			std::vector<std::vector<CompressedEdge> > compressed(
 				criticalNodes.size());
+			std::vector<bool> compressedBoundary(criticalNodes.size(), false);
 			std::size_t compressedEdgeCount = 0;
 			for (uint16_t node : criticalNodes) {
+				compressedBoundary[criticalIndex[node]] =
+					boundary.contains(node);
 				for (const DirectedEdge &first : internalAdj[node]) {
 					uint16_t dst = first.dst;
 					uint32_t length = 1;
@@ -1197,7 +1210,7 @@ uint32_t exactLongestTrail(
 					continue;
 				const auto distances = longestCompressedTrails(
 					compressed, compressedEdgeCount,
-					criticalIndex[start]);
+					criticalIndex[start], compressedBoundary);
 				for (uint16_t exit : criticalNodes) {
 					const uint32_t distance =
 						distances[criticalIndex[exit]];
@@ -1211,11 +1224,20 @@ uint32_t exactLongestTrail(
 						answer = std::max(
 							answer,
 							static_cast<uint32_t>(score));
+					const bool endpoint = boundary.contains(exit) &&
+						!(exit == start && distance == 0);
+					if (endpoint)
+						continue;
 					for (const DirectedEdge &edge : crossOut[exit]) {
 						const int64_t next =
 							static_cast<int64_t>(score + 1);
-						arrival[edge.dst] =
-							std::max(arrival[edge.dst], next);
+						if (boundary.contains(edge.dst)) {
+							answer = std::max(answer,
+								static_cast<uint32_t>(next));
+						} else {
+							arrival[edge.dst] =
+								std::max(arrival[edge.dst], next);
+						}
 					}
 				}
 			}
@@ -1307,7 +1329,7 @@ EFGStat metrics(const G_t G, const std::vector<ebpf_inst> &instructions,
 		}
 
 		stat.longestTrailBetweenBoundary = exactLongestTrail(
-			n, G, instructions, payload, boundary, remainingEdges);
+			n, G, instructions, payload, boundary);
 	}
 	return stat;
 }

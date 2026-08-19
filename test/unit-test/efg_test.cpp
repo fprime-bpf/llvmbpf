@@ -736,6 +736,31 @@ TEST_CASE("metrics: trails must belong to an entry-to-exit walk")
 	REQUIRE(stat.longestTrailBetweenBoundary == 1);
 }
 
+TEST_CASE("metrics: trail edges remain intact and intermediate boundaries stop trails")
+{
+	std::vector<ebpf_inst> instructions{
+		makeInst(EBPF_OP_MOV64_IMM), // 0: start boundary
+		makeInst(EBPF_OP_MOV64_IMM), // 1
+		makeInst(EBPF_OP_MOV64_IMM), // 2: intermediate boundary
+		makeInst(EBPF_OP_MOV64_IMM), // 3
+		makeInst(EBPF_OP_EXIT),      // 4: terminal boundary
+	};
+	const auto graph = buildEFG(instructions);
+	std::unordered_map<uint16_t, CompInfo> boundaries{
+		{ 0, CompInfo{} },
+		{ 2, CompInfo{} },
+		{ 4, CompInfo{} },
+	};
+
+	const EFGStat stat = metrics(graph.get(), instructions, boundaries);
+
+	// Snapshot cuts isolate ordinary boundary instructions for component
+	// statistics, but trail computation retains the original EFG edges. The
+	// boundary at 2 prevents combining 0 -> 1 -> 2 and 2 -> 3 -> 4.
+	REQUIRE(stat.longestTrailBetweenBoundary == 2);
+	REQUIRE(stat.maxCompSize == 2);
+}
+
 TEST_CASE("metrics: one boundary vertex admits the empty trail")
 {
 	std::vector<ebpf_inst> instructions{

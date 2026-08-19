@@ -108,18 +108,20 @@ struct EFGStat{
     std::string toString()const noexcept;
 };
 /*
-Compute metrics of a partitioned EFG. `boundary` are the information produced by `partition*` functions and passed to ``llvmbpf_vm::compileWithSS``. Therefore,
+Compute metrics of a partitioned EFG. `boundary` are the information produced by `partition*` functions and passed to ``llvmbpf_vm::compileWithSS``.
+
+When computing component information,
 for each instruction (vertex) in `boundary` remove either incoming or outgoing edges based on where `compileWithSS` inserts snapshots (like `partition2`). For
 example, if a snapshot is inserted after an instruction, then remove outgoing edges.
 
-`longestTrailBetweenBoundary` is the longest trail between any 2 vertices (instructions) in boundary. The 2 vertices may be the same, and the trail is directed.
-Only trails that can be embedded in an entry-to-terminal-EXIT walk are counted, as determined by EFG reachability (data-dependent branch feasibility is not represented by the EFG).
+`longestTrailBetweenBoundary` is the longest trail between any 2 vertices (instructions) in boundary that doesn't cross a boundary vertex along the way. The 2 vertices for start and end may be the same, and the trail is directed.
+Only trails that can be embedded in an entry-to-terminal-EXIT walk are counted, as determined by EFG reachability. Don't remove edges for trail computation.
 */
 /*
 Computing longest trail is a NP problem in general. However, you should take full advantage of unique properties of the graph here.
 Here are some of my insights, but they may be wrong.
-(1) After removing edges according to instructions above, the graph are split into weakly connected components. 2 vertices can
-only have a trail between them if they live in the same component.
+(1) The graph is directed, so not all pairs of vertices can reach each other. Also, since `partition*` splits graph into weakly connect component, trails that don't cross
+boundary vertices in the middle shouldn't be very long; they should "generally be living inside each component" (but remember, don't remove edges for trail computation).
 (2) The goal of using trail instead of path is to handle the following case. Suppose there's a loop `1->{2,100}->3, 100->101->{2,100}`.
 I want [1,2,100,101,2,3] instead of [1,2,3]. In other words, go around the loop once; or, equivalently, don't shrink loops.
 (3) This function will be applied to eBPF programs in "/home/cw3723/bpf-prime/tests/". Notice that none of them uses local eBPF functions.
