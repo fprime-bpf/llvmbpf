@@ -175,18 +175,20 @@ void compute(const std::string &name)
 
 	const auto graph = buildEFG(vm.instructions);
 	REQUIRE(graph != nullptr);
-	constexpr uint8_t parts=3;
+	constexpr uint8_t parts=32;
 	const uint16_t maxComponentSize = static_cast<uint16_t>(
 		(vm.instructions.size() + parts - 1) / parts);
 	INFO("partitioning " << name);
 	auto boundaries = partition(graph.get(), vm.instructions,
 				    maxComponentSize, useSrc, {});
 	boundaries.emplace(0, CompInfo{});
-	for (uint16_t pc = 0; pc < vm.instructions.size(); ++pc) {
-		if (vm.instructions[pc].opcode == EBPF_OP_EXIT &&
-		    graph[pc].empty())
-			boundaries.emplace(pc, CompInfo{});
-	}
+	// for (uint16_t pc = 0; pc < vm.instructions.size(); ++pc) {
+	// 	if (vm.instructions[pc].opcode == EBPF_OP_EXIT &&
+	// 	    graph[pc].empty())
+	// 		boundaries.emplace(pc, CompInfo{});
+	// }
+	for (const auto& a:findExits(graph.get(),vm.instructions))
+		boundaries.emplace(a,CompInfo{});
 	const auto m = metrics(graph.get(), vm.instructions, boundaries);
 	std::cout << name << ": " << m.toString() << '\n';
 	CAPTURE(name, vm.instructions.size(), m);
@@ -223,3 +225,5 @@ TEST_CASE("Real eBPF partition statistics", "[.][real-program][metrics]")
 }
 
 } // namespace
+
+//cmake --build build --target llvm_jit_tests -j && ./build/test/unit-test/llvm_jit_tests "Real eBPF partition statistics"

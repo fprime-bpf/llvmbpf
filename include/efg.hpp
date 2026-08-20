@@ -26,6 +26,8 @@ using G_t=std::vector<Edge>[];//adjacency list represented using array of vec of
 
 // Builds an execution flow graph. EFG describes the order that instructions are executed; it's like a fine grained CFG. If inst1 will be executed immediately after inst0, then there will be an `Edge` from inst0 to inst1.
 std::unique_ptr<G_t> buildEFG(const std::vector<ebpf_inst>&);
+//find `exit` instruction that actually terminates the program.
+std::unordered_set<uint16_t> findExits(const G_t,const std::vector<ebpf_inst>&)noexcept;
 struct CompInfo{
     std::bitset<11+11+1+1> modified;//r0-r10, fpu0-fpu10, usedHeap, usedStack. Note that changing r10 means call stack (in "../src/compiler.cpp") are also changed.
     bool fpuRegModified(uint8_t)const;
@@ -82,9 +84,7 @@ repeatedly evaluating every possible endpoint group:
 3. Select endpoint groups for edges crossing region boundaries.
 4. Recompute the resulting components and their metadata.
 
-Selecting an endpoint cuts all edges in that endpoint's group, so the final
-components may be smaller than the initial regions but can never exceed
-`maxSize`. The implementation is O(n+m) on average, assuming O(1)
+The implementation is O(n+m) on average, assuming O(1)
 unordered-container operations. It does not optimize the two optional quality
 objectives described above.
 */
@@ -101,8 +101,6 @@ struct EFGStat{
     A trail is a walk that doesn't have repeated edges, but may have repeated vertices. Here, the graph is produced by
     `buildEFG`. The length is number of edges in the trail.
     */
-    // An EFG can have almost twice as many edges as instructions, so this
-    // must be wider than the uint16_t instruction index type.
     uint32_t longestTrailBetweenBoundary;
 
     std::string toString()const noexcept;
@@ -117,25 +115,6 @@ example, if a snapshot is inserted after an instruction, then remove outgoing ed
 `longestTrailBetweenBoundary` is the longest trail between any 2 vertices (instructions) in boundary that doesn't cross a boundary vertex along the way. The 2 vertices for start and end may be the same, and the trail is directed.
 Only trails that can be embedded in an entry-to-terminal-EXIT walk are counted, as determined by EFG reachability. Don't remove edges for trail computation.
 */
-/*
-Computing longest trail is a NP problem in general. However, you should take full advantage of unique properties of the graph here.
-Here are some of my insights, but they may be wrong.
-(1) The graph is directed, so not all pairs of vertices can reach each other. Also, since `partition*` splits graph into weakly connect component, trails that don't cross
-boundary vertices in the middle shouldn't be very long; they should "generally be living inside each component" (but remember, don't remove edges for trail computation).
-(2) The goal of using trail instead of path is to handle the following case. Suppose there's a loop `1->{2,100}->3, 100->101->{2,100}`.
-I want [1,2,100,101,2,3] instead of [1,2,3]. In other words, go around the loop once; or, equivalently, don't shrink loops.
-(3) This function will be applied to eBPF programs in "/home/cw3723/bpf-prime/tests/". Notice that none of them uses local eBPF functions.
-Therefore, the max out degree of any vertex is at most 2 (conditional jumps). In fact, I expect the average out degree to be close to 1. Also,
-if you inspect, these programs don't have many eBPF instructions to begin with. The max number of instructions, as I recall, is around 25000.
-(4) The eBPF programs are assumed to terminate, so, starting from entry instruction, walks are only valid if it can reach the last `exit`.
-The trails I'm interested in should be part of one such walks.
-(5) Since these are eBPF programs, you might be able to do some control flow analysis to massively shrink the graph size. Since within
-each control flow block the execution flow is fixed.
-(6) This is really a helper function. It's not use in the jit compilation and execution pipeline. Therefore, you are allowed to use
-parallization.
 
-Important: regardless of what optimizations you did, make sure your optimization is correct and still produces exact results. I do not want
-any sort of approximations. I want the exact longest trail length as described above.
-*/
 EFGStat metrics(const G_t,const std::vector<ebpf_inst>&,const std::unordered_map<uint16_t,CompInfo>&boundary/*only keys are needed, values are unnecesary for our analysis*/)noexcept;
 #endif
