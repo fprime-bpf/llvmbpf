@@ -327,40 +327,43 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			return builder.CreatePointerCast(addr, ty->getPointerTo());
 		};
 		for (int i = 0; i <= 10; i++) {
-			Value *localCount = nullptr;
-			if (inputSnapshot && i < 10)
-				localCount = builder.CreateSelect(
-					hasInputSnapshot, builder.getInt32(0),
-					builder.getInt32(1));
 			auto *localReg = builder.CreateAlloca(
-				builder.getInt64Ty(), localCount,
+				builder.getInt64Ty(), nullptr,
 				"local_r" + std::to_string(i));
-			regs.push_back(i < 10 && inputSnapshot
-				? builder.CreateSelect(
-					hasInputSnapshot,
+			regs.push_back(localReg);
+			if (i < 10 && inputSnapshot) {
+				auto *snapshotValue = builder.CreateLoad(
+					builder.getInt64Ty(),
 					inputField(offsetof(ExecState, normRegs) +
-						   i * sizeof(uint64_t), builder.getInt64Ty()),
-					localReg, "r" + std::to_string(i))
-				: localReg);
-			Value *localFpuCount = inputSnapshot
-				? builder.CreateSelect(hasInputSnapshot,
-					builder.getInt32(0), builder.getInt32(1))
-				: nullptr;
+						   i * sizeof(uint64_t),
+						   builder.getInt64Ty()));
+				builder.CreateStore(
+					builder.CreateSelect(
+						hasInputSnapshot, snapshotValue,
+						UndefValue::get(builder.getInt64Ty())),
+					localReg);
+			}
 			auto *localFreg = builder.CreateAlloca(
-				builder.getFloatTy(), localFpuCount,
+				builder.getFloatTy(), nullptr,
 				"local_f" + std::to_string(i));
-			fregs.push_back(inputSnapshot
-				? builder.CreateSelect(
-					hasInputSnapshot,
+			fregs.push_back(localFreg);
+			if (inputSnapshot) {
+				auto *snapshotValue = builder.CreateLoad(
+					builder.getFloatTy(),
 					inputField(offsetof(ExecState, fpuRegs) +
-						   i * sizeof(float), builder.getFloatTy()),
-					localFreg, "f" + std::to_string(i))
-				: localFreg);
+						   i * sizeof(float), builder.getFloatTy()));
+				builder.CreateStore(
+					builder.CreateSelect(
+						hasInputSnapshot, snapshotValue,
+						UndefValue::get(builder.getFloatTy())),
+					localFreg);
+			}
 		}
 
 		// Create the data stack, one frame per possible nesting level.
 		// For SPIR-V/CUDA, use array type to avoid VLA issues
 		llvm::Value *stackBegin;
+		Value *restoredDataStackUsed = nullptr;
 		if (is_gpu) {
 			auto stackArrayTy = llvm::ArrayType::get(
 				builder.getInt8Ty(), dataStackSize);
@@ -368,20 +371,31 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 							   nullptr,
 							   "stackBegin");
 		} else {
-			Value *localStackSize = inputSnapshot
-				? builder.CreateSelect(hasInputSnapshot,
-					builder.getInt32(0), builder.getInt32(dataStackSize))
-				: builder.getInt32(dataStackSize);
 			stackBegin = builder.CreateAlloca(
 				builder.getInt8Ty(),
-				localStackSize, "stackBegin");
+				builder.getInt32(dataStackSize), "stackBegin");
 		}
 		if (inputSnapshot) {
 			auto *snapshotStack = builder.CreateLoad(
 				builder.getPtrTy(), inputField(offsetof(ExecState, dataStack),
 							 builder.getPtrTy()));
-			stackBegin = builder.CreateSelect(hasInputSnapshot, snapshotStack,
-						  stackBegin, "dataStack");
+			auto *snapshotUsed = builder.CreateLoad(
+				builder.getInt32Ty(), inputField(
+					offsetof(ExecState, dataStackOffset),
+					builder.getInt32Ty()));
+			restoredDataStackUsed = builder.CreateSelect(
+				hasInputSnapshot, snapshotUsed, builder.getInt32(0),
+				"restoredDataStackSize");
+			auto *offset = builder.CreateSub(builder.getInt32(dataStackSize),
+						 restoredDataStackUsed);
+			auto *srcBase = builder.CreateSelect(
+				hasInputSnapshot, snapshotStack, stackBegin,
+				"restoredDataStackSource");
+			builder.CreateMemCpy(
+				builder.CreateGEP(builder.getInt8Ty(), stackBegin, offset),
+				MaybeAlign(1),
+				builder.CreateGEP(builder.getInt8Ty(), srcBase, offset),
+				MaybeAlign(1), restoredDataStackUsed);
 		}
 		stackEnd = builder.CreateGEP(
 			builder.getInt8Ty(), stackBegin,
@@ -389,8 +403,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		Value *r10 = stackEnd;
 		if (inputSnapshot) {
 			auto *used = builder.CreateZExt(
-				builder.CreateLoad(builder.getInt32Ty(), inputField(
-					offsetof(ExecState, dataStackOffset), builder.getInt32Ty())),
+				restoredDataStackUsed,
 				builder.getInt64Ty());
 			r10 = builder.CreateSelect(
 				hasInputSnapshot,
@@ -400,6 +413,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		}
 		builder.CreateStore(r10, regs[10]);
 
+		Value *restoredCallStackCount = nullptr;
 		if (is_gpu) {
 			auto callStackArrayTy = llvm::ArrayType::get(
 				builder.getPtrTy(), callStackSize);
@@ -407,31 +421,37 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 							  nullptr,
 							  "callStack");
 		} else {
-			Value *localCallStackSize = inputSnapshot
-				? builder.CreateSelect(hasInputSnapshot,
-					builder.getInt32(0), builder.getInt32(callStackSize))
-				: builder.getInt32(callStackSize);
 			callStack = builder.CreateAlloca(
 				builder.getPtrTy(),
-				localCallStackSize, "callStack");
+				builder.getInt32(callStackSize), "callStack");
 		}
 		if (inputSnapshot) {
 			auto *snapshotCallStack = builder.CreateLoad(
 				builder.getPtrTy(), inputField(offsetof(ExecState, callStack),
 							 builder.getPtrTy()));
-			callStack = builder.CreateSelect(hasInputSnapshot, snapshotCallStack,
-						  callStack, "callStackStorage");
+			auto *snapshotCount = builder.CreateLoad(
+				builder.getInt16Ty(), inputField(
+					offsetof(ExecState, callStackSize),
+					builder.getInt16Ty()));
+			restoredCallStackCount = builder.CreateSelect(
+				hasInputSnapshot, snapshotCount, builder.getInt16(0),
+				"restoredCallStackSize");
+			auto *src = builder.CreateSelect(
+				hasInputSnapshot, snapshotCallStack, callStack,
+				"restoredCallStackSource");
+			builder.CreateMemCpy(
+				callStack, MaybeAlign(alignof(void *)), src,
+				MaybeAlign(alignof(void *)),
+				builder.CreateMul(
+					builder.CreateZExt(restoredCallStackCount,
+							 builder.getInt64Ty()),
+					builder.getInt64(sizeof(void *))));
 		}
 		callItemCnt = builder.CreateAlloca(builder.getInt16Ty(),
 						   nullptr, "callItemCnt");
 		Value *initialCallCount = builder.getInt16(0);
 		if (inputSnapshot)
-			initialCallCount = builder.CreateSelect(
-				hasInputSnapshot,
-				builder.CreateLoad(builder.getInt16Ty(),
-					inputField(offsetof(ExecState, callStackSize),
-						   builder.getInt16Ty())),
-				builder.getInt16(0));
+			initialCallCount = restoredCallStackCount;
 		builder.CreateStore(initialCallCount, callItemCnt);
 		if (main_func_with_arguments) {
 			llvm::Value *mem = is_gpu ? bpf_func->getArg(0) : nullptr;

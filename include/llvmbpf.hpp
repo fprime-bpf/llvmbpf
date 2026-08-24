@@ -32,11 +32,10 @@ class llvm_bpf_jit_context;
 // The JITed function signature.
 // The JITed function can be called with a snapshot.
 /*
-When `snapshot!=nullptr`, resume execution from the state described within. This means, (1) Don't allocate float point registers, directly use `snapshot->fpuRegs`. Their size should match.
-(2) Don't allocate storage for r0-r9, use `snapshot->normRegs`. r10 would still need to be allocated, but its value will be reconstructed from `snapshot->dataStackOffset`.
-(3) Directly use `callStackSize` as `callItemCnt`. Even though the former is 2-byte, `callItemCnt` should never exceed uint16_t anyway. (4) Load `snapshot->heap` and `heapSize` into r1 and r2, respectively, to represent heap memory (similar to previous implementation). (5) Don't allocate call and data stack, directly use the one in `snapshot`.
-(6) After setup, execute from eBPF instruction at `snapshot->pc` by jumping to it. All states are set, so execution should be able to properly resume. By using the things in `snapshot`, copying
-is avoided.
+When `snapshot!=nullptr`, resume execution from the state described within. Registers and both stacks always use storage allocated by the JITed function. Copy r0-r9 and the floating-point registers from `snapshot`, and reconstruct r10 from `snapshot->dataStackOffset` after copying the live data-stack bytes into the local stack.
+Initialize the local call stack and its item count from `snapshot->callStack` and `snapshot->callStackSize`. Load `snapshot->heap` and `heapSize` into r1 and r2, respectively, to represent heap memory (similar to previous implementation).
+After setup, execute from eBPF instruction at `snapshot->pc` by jumping to it. All states are set, so execution should be able to properly resume. Copying
+is limited to the live stack regions and register values.
 
 When `snapshot==nullptr`, then `heapSize` is ignored (no heap). Stack memories and registers are allocated when executing the program, like previous implementation. Do the same when
 the jitted function is called without any arguments. If `snapshot->pc` is not a valid compiled resume target, the function returns that PC in bits 0-15 with bit 16 set.

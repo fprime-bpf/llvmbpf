@@ -450,6 +450,9 @@ TEST_CASE("Test compileWithSS resumes normal instructions")
 
 	state.normRegs[0] = 20;
 	REQUIRE((*func)(sizeof(heap), &state) == 25);
+	// Resume state is copied into local register storage. With no later
+	// snapshot point, executing the ADD must not modify the input state.
+	REQUIRE(state.normRegs[0] == 20);
 	REQUIRE((*func)(sizeof(heap), nullptr) == 16);
 }
 
@@ -480,6 +483,45 @@ TEST_CASE("Test compileWithSS rejects an invalid resume PC")
 
 	state.pc = 42;
 	REQUIRE((*func)(sizeof(heap), &state) == (uint64_t{ 42 } | (1ULL << 16)));
+}
+
+TEST_CASE("Test compileWithSS resumes in a local data stack")
+{
+	std::vector<ebpf_inst> insts = {
+		{ EBPF_OP_MOV_IMM, BPF_REG_3, 0, 0, 9 },
+		{ EBPF_OP_JEQ_IMM, BPF_REG_3, 0, 0, 9 },
+		{ EBPF_OP_STXW, BPF_REG_10, BPF_REG_3, -4, 0 },
+		{ EBPF_OP_LDXW, BPF_REG_0, BPF_REG_10, -4, 0 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+	};
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.load_code(insts.data(), insts.size() * sizeof(ebpf_inst)) == 0);
+	const auto full = partition(buildEFG(vm.instructions).get(),
+				    vm.instructions, 1, true, {});
+	auto point = full.find(1);
+	REQUIRE(point != full.end());
+
+	constexpr uint16_t frameSize = 512;
+	bpftime::ExecState state{};
+	uint8_t heap[8] = {}, dataStack[frameSize] = {};
+	void *callStack[5] = {};
+	state.heap = reinterpret_cast<std::byte *>(heap);
+	state.dataStack = reinterpret_cast<std::byte *>(dataStack);
+	state.callStack = reinterpret_cast<std::byte *>(callStack);
+	state.dataStackOffset = frameSize;
+	state.pc = 1;
+	state.normRegs[3] = 9;
+	const uint32_t original = 7;
+	std::memcpy(dataStack + frameSize - sizeof(original), &original,
+		    sizeof(original));
+
+	auto func = vm.compileWithSS(&state, { *point }, 1, frameSize);
+	REQUIRE(func);
+	REQUIRE((*func)(sizeof(heap), &state) == 9);
+	uint32_t retained = 0;
+	std::memcpy(&retained, dataStack + frameSize - sizeof(retained),
+		    sizeof(retained));
+	REQUIRE(retained == original);
 }
 
 TEST_CASE("Test compileWithSS resumes before a conditional branch")
