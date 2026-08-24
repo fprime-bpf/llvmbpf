@@ -76,12 +76,15 @@ int llvmbpf_vm::exec(void *mem, uint32_t mem_len,
 		if(mem){
 			auto data_stack=std::make_unique<std::byte[]>(static_cast<size_t>(compiled_max_func_nest_depth) * compiled_frame_size);
 			auto call_stack=std::make_unique<std::byte[]>(static_cast<size_t>(compiled_max_func_nest_depth) * 5*sizeof(uint64_t));
-			ExecState initial_state;
+			ExecState initial_state{};
 			initial_state.heap = static_cast<std::byte *>(mem);
 			initial_state.dataStack = data_stack.get();
 			initial_state.callStack = call_stack.get();
 			initial_state.dataStackOffset = compiled_frame_size;
 			initial_state.pc = 0;
+			initial_state.normRegs[1] =
+				reinterpret_cast<uintptr_t>(mem);
+			initial_state.normRegs[2] = mem_len;
 			bpf_return_value = (*jitted_function)(mem_len, &initial_state);
 		}else{
 			bpf_return_value = (*jitted_function)(0, nullptr);
@@ -153,6 +156,49 @@ std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compileWithSS(
 			error_msg = LLVMGetErrorMessage(llvmError);
 			SPDLOG_ERROR("LLVM-JIT: failed to compile: {}",
 				     error_msg);
+			return {};
+		}
+		auto func = jit_ctx->get_entry_address();
+		compiled_max_func_nest_depth = maxFuncNestDepth;
+		compiled_frame_size = frameSize;
+		jitted_function = func;
+		return func;
+	} catch (const std::exception &e) {
+		error_msg = e.what();
+		jitted_function = std::nullopt;
+		return {};
+	}
+}
+
+std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compileWithSS1(
+	const ExecState *store, uint8_t maxFuncNestDepth, uint16_t frameSize,
+	uint16_t heapSize) noexcept
+{
+	if (jitted_function) {
+		error_msg = "Already compiled";
+		return jitted_function;
+	}
+	if (!store) {
+		error_msg = "ExecState store must not be null";
+		return {};
+	}
+	if (maxFuncNestDepth == 0 || frameSize == 0) {
+		error_msg = "Stack dimensions must not be zero";
+		return {};
+	}
+	if (!store->dataStack || !store->callStack ||
+	    (heapSize != 0 && !store->heap)) {
+		error_msg = "ExecState storage pointers must not be null";
+		return {};
+	}
+	try {
+		auto res = jit_ctx->do_jit_compile_with_ss1(
+			maxFuncNestDepth, frameSize,
+			reinterpret_cast<uintptr_t>(store), heapSize);
+		if (res) {
+			LLVMErrorRef llvmError = llvm::wrap(std::move(res));
+			error_msg = LLVMGetErrorMessage(llvmError);
+			SPDLOG_ERROR("LLVM-JIT: failed to compile: {}", error_msg);
 			return {};
 		}
 		auto func = jit_ctx->get_entry_address();

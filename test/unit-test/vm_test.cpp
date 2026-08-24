@@ -141,6 +141,121 @@ TEST_CASE("Test compileWithSS snapshots registers")
 	REQUIRE(state.normRegs[0] == 4);
 }
 
+TEST_CASE("Test compileWithSS1 executes directly in fixed state storage")
+{
+	// r0 = 7; r0 += 2; exit
+	std::vector<ebpf_inst> insts = {
+		{ EBPF_OP_MOV64_IMM, BPF_REG_0, 0, 0, 7 },
+		{ EBPF_OP_ADD64_IMM, BPF_REG_0, 0, 0, 2 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+	};
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.load_code(insts.data(), insts.size() * sizeof(ebpf_inst)) ==
+		0);
+
+	constexpr uint16_t frameSize = 128;
+	uint8_t heap[8] = {};
+	uint8_t dataStack[frameSize] = {};
+	uint8_t callStack[5 * sizeof(void *)] = {};
+	bpftime::ExecState state{};
+	state.heap = reinterpret_cast<std::byte *>(heap);
+	state.dataStack = reinterpret_cast<std::byte *>(dataStack);
+	state.callStack = reinterpret_cast<std::byte *>(callStack);
+
+	auto func = vm.compileWithSS1(&state, 1, frameSize, sizeof(heap));
+	REQUIRE(func.has_value());
+	REQUIRE((*func)(999, nullptr) == 9);
+	REQUIRE(state.normRegs[0] == 9);
+	REQUIRE(state.normRegs[1] == reinterpret_cast<uintptr_t>(heap));
+	REQUIRE(state.normRegs[2] == sizeof(heap));
+	REQUIRE(state.dataStackOffset == frameSize);
+	REQUIRE(state.callStackSize == 0);
+	REQUIRE(state.pc == 2);
+}
+
+TEST_CASE("Test compileWithSS1 restores and resumes every instruction")
+{
+	// Resuming at pc=1 must skip the assignment at pc=0.
+	std::vector<ebpf_inst> insts = {
+		{ EBPF_OP_MOV64_IMM, BPF_REG_0, 0, 0, 1 },
+		{ EBPF_OP_ADD64_IMM, BPF_REG_0, 0, 0, 2 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+	};
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.load_code(insts.data(), insts.size() * sizeof(ebpf_inst)) ==
+		0);
+
+	constexpr uint16_t frameSize = 128;
+	uint8_t fixedHeap[8] = {};
+	uint8_t fixedDataStack[frameSize] = {};
+	uint8_t fixedCallStack[5 * sizeof(void *)] = {};
+	bpftime::ExecState fixed{};
+	fixed.heap = reinterpret_cast<std::byte *>(fixedHeap);
+	fixed.dataStack = reinterpret_cast<std::byte *>(fixedDataStack);
+	fixed.callStack = reinterpret_cast<std::byte *>(fixedCallStack);
+
+	auto func = vm.compileWithSS1(&fixed, 1, frameSize, sizeof(fixedHeap));
+	REQUIRE(func.has_value());
+
+	uint8_t sourceHeap[8] = { 0x42 };
+	uint8_t sourceDataStack[frameSize] = {};
+	uint8_t sourceCallStack[5 * sizeof(void *)] = {};
+	bpftime::ExecState source{};
+	source.normRegs[0] = 10;
+	source.heap = reinterpret_cast<std::byte *>(sourceHeap);
+	source.dataStack = reinterpret_cast<std::byte *>(sourceDataStack);
+	source.callStack = reinterpret_cast<std::byte *>(sourceCallStack);
+	source.dataStackOffset = frameSize;
+	source.pc = 1;
+
+	REQUIRE((*func)(0, &source) == 12);
+	REQUIRE(fixed.normRegs[0] == 12);
+	REQUIRE(fixedHeap[0] == 0x42);
+	REQUIRE(fixed.pc == 2);
+
+	source.pc = 99;
+	REQUIRE((*func)(0, &source) == ((1ULL << 16) | 99));
+	REQUIRE(fixed.pc == 99);
+}
+
+TEST_CASE("Test compileWithSS1 tracks direct stacks across local calls")
+{
+	// call callee; exit; callee writes its frame and returns 4
+	std::vector<ebpf_inst> insts = {
+		{ EBPF_OP_MOV64_IMM, BPF_REG_0, 0, 0, 0 },
+		{ EBPF_OP_CALL, 0, 1, 0, 1 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+		{ EBPF_OP_MOV64_IMM, BPF_REG_1, 0, 0, 7 },
+		{ EBPF_OP_STXDW, BPF_REG_10, BPF_REG_1, -8, 0 },
+		{ EBPF_OP_MOV64_IMM, BPF_REG_0, 0, 0, 4 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+	};
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.load_code(insts.data(), insts.size() * sizeof(ebpf_inst)) ==
+		0);
+
+	constexpr uint16_t frameSize = 128;
+	constexpr uint8_t maxDepth = 2;
+	uint8_t heap[1] = {};
+	uint8_t dataStack[frameSize * maxDepth] = {};
+	uint8_t callStack[5 * maxDepth * sizeof(void *)] = {};
+	bpftime::ExecState state{};
+	state.heap = reinterpret_cast<std::byte *>(heap);
+	state.dataStack = reinterpret_cast<std::byte *>(dataStack);
+	state.callStack = reinterpret_cast<std::byte *>(callStack);
+
+	auto func = vm.compileWithSS1(&state, maxDepth, frameSize, sizeof(heap));
+	REQUIRE(func.has_value());
+	REQUIRE((*func)(0, nullptr) == 4);
+	REQUIRE(state.dataStackOffset == frameSize);
+	REQUIRE(state.callStackSize == 0);
+	REQUIRE(state.pc == 2);
+	uint64_t calleeValue = 0;
+	std::memcpy(&calleeValue, dataStack + frameSize - 8,
+		    sizeof(calleeValue));
+	REQUIRE(calleeValue == 7);
+}
+
 TEST_CASE("Test compileWithSS snapshots memory")
 {
 	// r2 = 0x42; *(u8 *)(r1 + 0) = r2; r0 = 4; exit

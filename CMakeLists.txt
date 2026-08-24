@@ -39,6 +39,7 @@ endfunction()
 bpftime_add_library(llvmbpf_vm
     src/llvm_jit_context.cpp
     src/compiler.cpp
+    src/compiler_ss1.cpp
     src/compiler_utils.cpp
     src/efg.cpp
     src/vm.cpp

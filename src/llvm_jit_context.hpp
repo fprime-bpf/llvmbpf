@@ -52,6 +52,12 @@ class llvm_bpf_jit_context {
 		       bool is_gpu = false,
 		       const std::unordered_map<uint16_t, CompInfo> *instInfo = nullptr,
 		       uintptr_t register_state_store_addr = 0);
+	llvm::Expected<llvm::orc::ThreadSafeModule> generateModuleWithSS1(
+		uint8_t maxFuncNestDepth, uint16_t frameSize,
+		const std::vector<std::string> &extFuncNames,
+		const std::vector<std::string> &lddwHelpers,
+		bool patch_map_val_at_compile_time,
+		uintptr_t register_state_store_addr, uint16_t fixed_heap_size);
 	std::vector<uint8_t>
 	do_aot_compile(const std::vector<std::string> &extFuncNames,
 		       const std::vector<std::string> &lddwHelpers,
@@ -68,6 +74,10 @@ class llvm_bpf_jit_context {
 	do_jit_compile_with_ss(uint8_t maxFuncNestDepth, uint16_t frameSize,
 			       uintptr_t register_state_store_addr,
 			       const std::unordered_map<uint16_t, CompInfo> &instInfo);
+	llvm::Error do_jit_compile_with_ss1(uint8_t maxFuncNestDepth,
+					 uint16_t frameSize,
+					 uintptr_t register_state_store_addr,
+					 uint16_t heapSize);
 	llvm_bpf_jit_context(llvmbpf_vm &vm);
 	virtual ~llvm_bpf_jit_context();
 	precompiled_ebpf_function get_entry_address();

@@ -129,6 +129,22 @@ class llvmbpf_vm {
 	*/
 	std::optional<precompiled_ebpf_function> compileWithSS(const ExecState* store,const std::unordered_map<uint16_t,CompInfo>& instInfo,uint8_t maxFuncNestDepth,uint16_t frameSize) noexcept;
 
+	/*
+	A per-instruction snapshot instrumentation mode.
+
+	Don't use alloca to create storage for registers and stack memory, directly use what is provided inside `store`. You may treat whatever in `store` as compile time constants.
+	Since there is no storage for r10, reconstruct its value from `datastackOffset` everytime it's used.
+	Set `store->pc` immediately before each eBPF instruction.
+	The `heapSize` in generated jitted function `using precompiled_ebpf_function = uint64_t (*)(uint32_t heapSize, ExecState *snapshot);` shall be ignored. `snapshot` will be used to resume execution
+	when provided, ignored when `nullptr`. When using `snapshot` to resume, copy the approriate values into `store` (since pointers in `store` are treated as compile time constants).
+
+	While most of the implementation will be similar to "/home/cw3723/bpf-prime/Components/BpfSequencer/llvmbpf/src/compiler.cpp" `generateModule`, don't add
+	features to that function: that function already does too many things. You can create a new `generateModule` just for this `compileWithSS1`, or put
+	the implementation in some other fucntions. There's no need to support `main_func_with_arguments=false` because it's not used anywhere. There's no need
+	to support `is_gpu=true`, because `compileWithSS1` will always be used with it set to false.
+	*/
+	std::optional<precompiled_ebpf_function> compileWithSS1(const ExecState* store,uint8_t maxFuncNestDepth,uint16_t frameSize,uint16_t heapSize)noexcept;
+
 	// See the spec for details.
 	// If the code involve array map access, the map_val function
 	// needs to be provided.

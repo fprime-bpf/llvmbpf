@@ -182,11 +182,6 @@ void compute(const std::string &name)
 	auto boundaries = partition(graph.get(), vm.instructions,
 				    maxComponentSize, useSrc, {});
 	boundaries.emplace(0, CompInfo{});
-	// for (uint16_t pc = 0; pc < vm.instructions.size(); ++pc) {
-	// 	if (vm.instructions[pc].opcode == EBPF_OP_EXIT &&
-	// 	    graph[pc].empty())
-	// 		boundaries.emplace(pc, CompInfo{});
-	// }
 	for (const auto& a:findExits(graph.get(),vm.instructions))
 		boundaries.emplace(a,CompInfo{});
 	const auto m = metrics(graph.get(), vm.instructions, boundaries);
