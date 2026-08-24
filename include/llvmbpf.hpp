@@ -118,14 +118,6 @@ class llvmbpf_vm {
 	is the input. (3) Load the location of LLVM IR that eBPF instruction at `pc` corresponds to. (4) Jump to that location to resume exeuction. This describes instrumentation needed for jumping. Additional instrumentation for
 	restoring register and memory states are described earlier in definition of `precompiled_ebpf_function`.
 	*/
-	/*Thoughts:
-	Implementing execution resuming is hard. eBPF doesn't have a dynamic jump instruction, so if you want to do instrumentation at eBPF level, you
-	would have to chain a bunch of conditional jumps. I'm not sure whether LLVM IR has dynamic jump instruction, but if it does, you can create a
-	jump table.
-
-	Finding where each eBPF instruction corresponds to in LLVM IR may also hard. I'm not sure if LLVM IR supports labeling to help you with the
-	creation of jump tables.
-	*/
 	std::optional<precompiled_ebpf_function> compileWithSS(const ExecState* store,const std::unordered_map<uint16_t,CompInfo>& instInfo,uint8_t maxFuncNestDepth,uint16_t frameSize) noexcept;
 
 	/*
@@ -136,11 +128,6 @@ class llvmbpf_vm {
 	Set `store->pc` immediately before each eBPF instruction.
 	The `heapSize` in generated jitted function `using precompiled_ebpf_function = uint64_t (*)(uint32_t heapSize, ExecState *snapshot);` shall be ignored. `snapshot` will be used to resume execution
 	when provided, ignored when `nullptr`. When using `snapshot` to resume, copy the approriate values into `store` (since pointers in `store` are treated as compile time constants).
-
-	While most of the implementation will be similar to "/home/cw3723/bpf-prime/Components/BpfSequencer/llvmbpf/src/compiler.cpp" `generateModule`, don't add
-	features to that function: that function already does too many things. You can create a new `generateModule` just for this `compileWithSS1`, or put
-	the implementation in some other fucntions. There's no need to support `main_func_with_arguments=false` because it's not used anywhere. There's no need
-	to support `is_gpu=true`, because `compileWithSS1` will always be used with it set to false.
 	*/
 	std::optional<precompiled_ebpf_function> compileWithSS1(const ExecState* store,uint8_t maxFuncNestDepth,uint16_t frameSize,uint16_t heapSize)noexcept;
 
@@ -169,11 +156,6 @@ class llvmbpf_vm {
 	uint64_t (*var_addr)(uint32_t) = nullptr;
 	uint64_t (*code_addr)(uint32_t) = nullptr;
 
-	/*
-	There may be a need to implement a way for callers to specify `regOnlyExtFuncs` when calling `partition`. 
-
-	At "../../bpfwrappers.cpp:77", `.compile` will be switched to `.compileWithSS`, so `buildEFG` and `partition` will be called just before that.
-	*/
 	std::vector<std::optional<external_function> > ext_funcs;
 
 	std::unique_ptr<llvm_bpf_jit_context> jit_ctx;
