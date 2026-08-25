@@ -21,7 +21,7 @@ struct external_function {
 };
 struct ExecState{
 	uint64_t normRegs[10];//r0-r9
-	std::byte *heap, *dataStack, *callStack;//set before `compileWithSS` and remains constant until `exec` is done. user should ensure they've sufficient size.
+	std::byte *heap, *dataStack, *callStack;//set before `compileWithSS`; their values are embedded in the jitted program and their buffers must remain valid until execution is done. user should ensure they've sufficient size.
 	float fpuRegs[11];//fpu0-10.
 	uint32_t dataStackOffset=0;//`stackEnd-(r10-frameSize)`: how many bytes of data stack are in use, including the frame currently being written. `frameSize` on entry, grows by frameSize per nested call. Live bytes occupy the end of the `frameSize*maxFuncNestDepth`-byte `dataStack` buffer. To restore: `r10=stackEnd-dataStackOffset+frameSize`.
 	uint16_t callStackSize=0;//raw `callItemCnt`: number of call stack slots in use. `callStack` holds `callStackSize*sizeof(void*)` bytes. To restore: `callItemCnt=callStackSize`.

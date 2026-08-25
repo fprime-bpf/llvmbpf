@@ -280,6 +280,7 @@ TEST_CASE("Test compileWithSS snapshots memory")
 	std::memset(&state, 0, sizeof(state));
 	constexpr uint16_t memSize = 8;
 	uint8_t snapshotBuf[memSize] = {};
+	uint8_t alternateSnapshotBuf[memSize] = {};
 	uint8_t dataStackBuf[512] = {};
 	uint8_t callStackBuf[5 * sizeof(void *)] = {};
 	state.heap = reinterpret_cast<std::byte *>(snapshotBuf);
@@ -291,6 +292,7 @@ TEST_CASE("Test compileWithSS snapshots memory")
 	// compile-time constant.
 	auto func = vm.compileWithSS(&state, instInfo, 1, 512);
 	REQUIRE(func.has_value());
+	state.heap = reinterpret_cast<std::byte *>(alternateSnapshotBuf);
 
 	uint64_t ret = 0;
 	REQUIRE(vm.exec(progMem, memSize, ret) == 0);
@@ -301,6 +303,7 @@ TEST_CASE("Test compileWithSS snapshots memory")
 	// non-regOnly boundary at or after the STXB.
 	REQUIRE(progMem[0] == 0x42);
 	REQUIRE(snapshotBuf[0] == 0x42);
+	REQUIRE(alternateSnapshotBuf[0] == 0);
 }
 
 TEST_CASE("Test compileWithSS snapshots the data stack")
@@ -319,6 +322,7 @@ TEST_CASE("Test compileWithSS snapshots the data stack")
 	bpftime::ExecState state{};
 	uint64_t heapBuf = 0;
 	uint8_t dataStackBuf[frameSize] = {};
+	uint8_t alternateDataStackBuf[frameSize] = {};
 	uint8_t callStackBuf[5 * sizeof(void *)] = {};
 	state.heap = reinterpret_cast<std::byte *>(&heapBuf);
 	state.dataStack = reinterpret_cast<std::byte *>(dataStackBuf);
@@ -326,6 +330,7 @@ TEST_CASE("Test compileWithSS snapshots the data stack")
 
 	auto func = vm.compileWithSS(&state, instInfo, 1, frameSize);
 	REQUIRE(func.has_value());
+	state.dataStack = reinterpret_cast<std::byte *>(alternateDataStackBuf);
 
 	uint64_t mem = 0, ret = 0;
 	REQUIRE(vm.exec(&mem, sizeof(mem), ret) == 0);
@@ -343,6 +348,9 @@ TEST_CASE("Test compileWithSS snapshots the data stack")
 	std::memcpy(&stored, dataStackBuf + state.dataStackOffset - 4,
 		    sizeof(stored));
 	REQUIRE(stored == 4);
+	REQUIRE(std::all_of(std::begin(alternateDataStackBuf),
+			    std::end(alternateDataStackBuf),
+			    [](uint8_t byte) { return byte == 0; }));
 }
 
 TEST_CASE("Test compileWithSS snapshots stacks across a local call")
@@ -387,12 +395,14 @@ TEST_CASE("Test compileWithSS snapshots stacks across a local call")
 	uint64_t heapBuf = 0;
 	uint8_t dataStackBuf[frameSize * maxDepth] = {};
 	uint8_t callStackBuf[5 * maxDepth * sizeof(void *)] = {};
+	uint8_t alternateCallStackBuf[5 * maxDepth * sizeof(void *)] = {};
 	state.heap = reinterpret_cast<std::byte *>(&heapBuf);
 	state.dataStack = reinterpret_cast<std::byte *>(dataStackBuf);
 	state.callStack = reinterpret_cast<std::byte *>(callStackBuf);
 
 	auto func = vm.compileWithSS(&state, instInfo, maxDepth, frameSize);
 	REQUIRE(func.has_value());
+	state.callStack = reinterpret_cast<std::byte *>(alternateCallStackBuf);
 
 	uint64_t mem = 0, ret = 0;
 	REQUIRE(vm.exec(&mem, sizeof(mem), ret) == 0);
@@ -407,6 +417,11 @@ TEST_CASE("Test compileWithSS snapshots stacks across a local call")
 	// are in use, along with the five call stack slots pushed by the call.
 	REQUIRE(state.dataStackOffset == 2 * frameSize);
 	REQUIRE(state.callStackSize == 5);
+	REQUIRE(std::any_of(std::begin(callStackBuf), std::end(callStackBuf),
+			    [](uint8_t byte) { return byte != 0; }));
+	REQUIRE(std::all_of(std::begin(alternateCallStackBuf),
+			    std::end(alternateCallStackBuf),
+			    [](uint8_t byte) { return byte == 0; }));
 	// dataStack holds [r10-frameSize, stackEnd), so the callee's store to
 	// [r10-4] sits frameSize+4 bytes below the top of the copied region.
 	uint32_t stored = 0;

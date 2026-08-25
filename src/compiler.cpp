@@ -120,6 +120,12 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 					offsetof(ExecState, fpuRegs)),
 			fpuRegisterStateStoreTy);
 	auto *i8PtrTy = Type::getInt8Ty(*context)->getPointerTo();
+	auto pointerConstant = [&](const void *ptr) -> Constant * {
+		return llvm::ConstantExpr::getIntToPtr(
+			llvm::ConstantInt::get(Type::getInt64Ty(*context),
+					       reinterpret_cast<uintptr_t>(ptr)),
+			i8PtrTy);
+	};
 	auto execStateField = [&](size_t off, llvm::Type *ty) -> Constant * {
 		if (register_state_store_addr == 0)
 			return nullptr;
@@ -128,12 +134,17 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 					       register_state_store_addr + off),
 			ty->getPointerTo());
 	};
-	auto *heapSnapshotDstSlot =
-		execStateField(offsetof(ExecState, heap), i8PtrTy);
-	auto *dataStackSnapshotDstSlot =
-		execStateField(offsetof(ExecState, dataStack), i8PtrTy);
-	auto *callStackSnapshotDstSlot =
-		execStateField(offsetof(ExecState, callStack), i8PtrTy);
+	const auto *snapshotStore = reinterpret_cast<const ExecState *>(
+		register_state_store_addr);
+	auto *heapSnapshotDst = snapshotStore
+		? pointerConstant(snapshotStore->heap)
+		: nullptr;
+	auto *dataStackSnapshotDst = snapshotStore
+		? pointerConstant(snapshotStore->dataStack)
+		: nullptr;
+	auto *callStackSnapshotDst = snapshotStore
+		? pointerConstant(snapshotStore->callStack)
+		: nullptr;
 	// Relative stack metadata, written alongside the stack copies.
 	auto *dataStackOffsetSlot = execStateField(
 		offsetof(ExecState, dataStackOffset), Type::getInt32Ty(*context));
@@ -657,11 +668,9 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 	// Unlike the stacks, the used portion of the heap can't be determined,
 	// so the whole buffer is copied.
 	auto emitHeapSnapshot = [&]() {
-		if (!memSnapshotSrc || !heapSnapshotDstSlot)
+		if (!memSnapshotSrc || !heapSnapshotDst)
 			return;
-		auto *dst = builder.CreateLoad(builder.getPtrTy(),
-					       heapSnapshotDstSlot);
-		builder.CreateMemCpy(dst, MaybeAlign(1), memSnapshotSrc,
+		builder.CreateMemCpy(heapSnapshotDst, MaybeAlign(1), memSnapshotSrc,
 				     MaybeAlign(1), memSnapshotLen);
 	};
 	// Emits copies of the live portions of both stacks, plus the relative
@@ -692,11 +701,9 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 		builder.CreateStore(
 			builder.CreateTrunc(used, builder.getInt32Ty()),
 			dataStackOffsetSlot);
-		if (dataStackSnapshotDstSlot) {
-			auto *dstBase = builder.CreateLoad(builder.getPtrTy(),
-						       dataStackSnapshotDstSlot);
+		if (dataStackSnapshotDst) {
 			auto *dst = builder.CreateGEP(
-				builder.getInt8Ty(), dstBase,
+				builder.getInt8Ty(), dataStackSnapshotDst,
 				{ builder.CreateSub(builder.getInt64(dataStackSize), used) });
 			auto *src = builder.CreateIntToPtr(liveBase,
 							   builder.getPtrTy());
@@ -708,14 +715,13 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModule(
 			builder.CreateLoad(builder.getInt16Ty(), callItemCnt);
 		if (callStackSizeSlot)
 			builder.CreateStore(count, callStackSizeSlot);
-		if (callStackSnapshotDstSlot) {
-			auto *dst = builder.CreateLoad(builder.getPtrTy(),
-						       callStackSnapshotDstSlot);
+		if (callStackSnapshotDst) {
 			auto *bytes = builder.CreateMul(
 				builder.CreateZExt(count, builder.getInt64Ty()),
 				builder.getInt64(sizeof(void *)),
 				"callStackBytes");
-			builder.CreateMemCpy(dst, MaybeAlign(alignof(void *)),
+			builder.CreateMemCpy(callStackSnapshotDst,
+					     MaybeAlign(alignof(void *)),
 					     callStack,
 					     MaybeAlign(alignof(void *)), bytes);
 		}
