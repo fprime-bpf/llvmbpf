@@ -124,7 +124,7 @@ class llvmbpf_vm {
 	A per-instruction snapshot instrumentation mode.
 
 	Don't use alloca to create storage for registers and stack memory, directly use what is provided inside `store`. You may treat whatever in `store` as compile time constants.
-	Since there is no storage for r10, reconstruct its value from `datastackOffset` everytime it's used.
+	Since `dataStackOffset` is the authoritative state for r10, reconstruct r10 from it only when an instruction uses r10. If an instruction writes r10, derive the new `dataStackOffset` from the would-be r10 result immediately.
 	Set `store->pc` immediately before each eBPF instruction.
 	The `heapSize` in generated jitted function `using precompiled_ebpf_function = uint64_t (*)(uint32_t heapSize, ExecState *snapshot);` shall be ignored. `snapshot` will be used to resume execution
 	when provided, ignored when `nullptr`. When using `snapshot` to resume, copy the approriate values into `store` (since pointers in `store` are treated as compile time constants).

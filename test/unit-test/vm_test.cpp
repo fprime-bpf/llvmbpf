@@ -218,6 +218,37 @@ TEST_CASE("Test compileWithSS1 restores and resumes every instruction")
 	REQUIRE(fixed.pc == 99);
 }
 
+TEST_CASE("Test compileWithSS1 derives r10 reads and writes from the stack offset")
+{
+	// Move r10 down without touching memory, then read it back. r10 has no
+	// persistent architectural slot in SS1: the SUB must update
+	// dataStackOffset, and the MOV must reconstruct r10 from that offset.
+	std::vector<ebpf_inst> insts = {
+		{ EBPF_OP_SUB64_IMM, BPF_REG_10, 0, 0, 16 },
+		{ EBPF_OP_MOV64_REG, BPF_REG_0, BPF_REG_10, 0, 0 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+	};
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.load_code(insts.data(), insts.size() * sizeof(ebpf_inst)) ==
+		0);
+
+	constexpr uint16_t frameSize = 128;
+	uint8_t heap[1] = {};
+	uint8_t dataStack[frameSize * 2] = {};
+	uint8_t callStack[10 * sizeof(void *)] = {};
+	bpftime::ExecState state{};
+	state.heap = reinterpret_cast<std::byte *>(heap);
+	state.dataStack = reinterpret_cast<std::byte *>(dataStack);
+	state.callStack = reinterpret_cast<std::byte *>(callStack);
+
+	auto func = vm.compileWithSS1(&state, 2, frameSize, sizeof(heap));
+	REQUIRE(func.has_value());
+	const auto expectedR10 = reinterpret_cast<uintptr_t>(dataStack +
+							 sizeof(dataStack) - 16);
+	REQUIRE((*func)(0, nullptr) == expectedR10);
+	REQUIRE(state.dataStackOffset == frameSize + 16);
+}
+
 TEST_CASE("Test compileWithSS1 tracks direct stacks across local calls")
 {
 	// call callee; exit; callee writes its frame and returns 4

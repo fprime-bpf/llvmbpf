@@ -433,10 +433,14 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS1(
 				regs.push_back(execStateField(
 					offsetof(ExecState, normRegs) + i * sizeof(uint64_t),
 					builder.getInt64Ty()));
+			// The common instruction emitters require register operands to be
+			// addressable.  This is only a lowering scratch slot: r10's
+			// authoritative state is dataStackOffset, and the slot is populated
+			// only around instructions which actually reference r10.
 			auto *r10Storage = new GlobalVariable(
 				*jitModule, builder.getInt64Ty(), false,
 				GlobalValue::InternalLinkage, builder.getInt64(0),
-				"r10");
+				"r10.lowering.scratch");
 			regs.push_back(r10Storage);
 			for (int i = 0; i <= 10; ++i)
 				fregs.push_back(execStateField(
@@ -744,14 +748,8 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS1(
 				builder.CreateSub(offset, builder.getInt32(frameSize)),
 				dataStackOffsetSlot);
 		}
-		// Restore data stack
-		// r10 += frameSize
-		builder.CreateStore(
-			builder.CreateAdd(
-				builder.CreateLoad(builder.getInt64Ty(),
-						   regs[10]),
-				builder.getInt64(frameSize)),
-			regs[10]);
+		// Returning moves r10 up by one frame. In SS1, r10 is represented
+		// solely by dataStackOffset, which was adjusted above.
 		auto indrBr = builder.CreateIndirectBr(targetAddr);
 		for (const auto &item : localFuncRetBlks) {
 			indrBr->addDestination(instBlocks[item.first]);
@@ -825,7 +823,15 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS1(
 		if (!dataStackOffsetSlot)
 			return;
 		// --- data stack ---
-		auto *r10 = builder.CreateLoad(builder.getInt64Ty(), regs[10]);
+		auto *usedOffset = builder.CreateZExt(
+			builder.CreateLoad(builder.getInt32Ty(), dataStackOffsetSlot),
+			builder.getInt64Ty());
+		auto *r10 = builder.CreatePtrToInt(
+			builder.CreateGEP(
+				builder.getInt8Ty(), stackEnd,
+				{ builder.CreateSub(builder.getInt64(frameSize),
+						    usedOffset) }),
+			builder.getInt64Ty());
 		auto *endInt = builder.CreatePtrToInt(stackEnd,
 						      builder.getInt64Ty());
 		// Base of the frame in use: one frameSize below r10.
@@ -899,9 +905,11 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS1(
 			}
 		}
 		builder.SetInsertPoint(currBB);
-		if (per_instruction_state) {
-			// r10 is deliberately not part of ExecState. Reconstruct it
-			// from the live-stack size immediately before every instruction.
+		const bool instructionUsesR10 =
+			!duo_is_fpu(inst) && (inst.src == 10 || inst.dst == 10);
+		if (per_instruction_state && instructionUsesR10) {
+			// r10 is deliberately not part of ExecState. Materialize it in
+			// the lowering scratch only when this instruction references it.
 			auto *used = builder.CreateZExt(
 				builder.CreateLoad(builder.getInt32Ty(),
 						   dataStackOffsetSlot),
@@ -912,10 +920,9 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS1(
 			builder.CreateStore(builder.CreatePtrToInt(
 						    r10, builder.getInt64Ty()),
 					    regs[10]);
-			// This is intentionally the last instrumentation store before
-			// lowering the eBPF instruction itself.
-			builder.CreateStore(builder.getInt16(pc), pcSnapshotSlot);
 		}
+		if (per_instruction_state)
+			builder.CreateStore(builder.getInt16(pc), pcSnapshotSlot);
 
 		bool isFPU = duo_is_fpu(inst);
 		if (isFPU) {
@@ -1835,15 +1842,8 @@ According to eBPF docs, it should actually be sign-extended to
 									i -
 									4)) }));
 				}
-				// Move data stack
-				// r10 -= frameSize
-				builder.CreateStore(
-					builder.CreateSub(
-						builder.CreateLoad(
-							builder.getInt64Ty(),
-							regs[10]),
-						builder.getInt64(frameSize)),
-					regs[10]);
+				// Move the data stack down by one frame. SS1 represents
+				// this directly in dataStackOffset.
 				if (per_instruction_state) {
 					auto *offset = builder.CreateLoad(
 						builder.getInt32Ty(), dataStackOffsetSlot);
@@ -2135,6 +2135,35 @@ According to eBPF docs, it should actually be sign-extended to
 					" at pc " + std::to_string(pc),
 				llvm::inconvertibleErrorCode());
 		}
+		// Plain ALU and load instructions write their destination register.
+		// If that destination is r10, translate the would-be r10 value back
+		// into the authoritative relative stack offset immediately.
+		const auto instructionClass = inst.opcode & EBPF_CLS_MASK;
+		const bool atomicFetchWritesR10 =
+			instructionClass == EBPF_CLS_STX && inst.src == 10 &&
+			(inst.imm & EBPF_ATOMIC_OP_FETCH) != 0 &&
+			inst.imm != EBPF_ATOMIC_OP_CMPXCHG;
+		if (per_instruction_state &&
+		    (inst.dst == 10 || atomicFetchWritesR10)) {
+			if (instructionClass == EBPF_CLS_ALU ||
+			    instructionClass == EBPF_CLS_ALU64 ||
+			    instructionClass == EBPF_CLS_LD ||
+			    instructionClass == EBPF_CLS_LDX ||
+			    atomicFetchWritesR10) {
+				auto *newR10 = builder.CreateLoad(builder.getInt64Ty(),
+							      regs[10]);
+				auto *stackEndInt = builder.CreatePtrToInt(
+					stackEnd, builder.getInt64Ty());
+				auto *newOffset = builder.CreateAdd(
+					builder.CreateSub(stackEndInt, newR10),
+					builder.getInt64(frameSize));
+				builder.CreateStore(
+					builder.CreateTrunc(newOffset,
+							    builder.getInt32Ty()),
+					dataStackOffsetSlot);
+			}
+		}
+
 		// Snapshot after every plain register-modifying instruction
 		// (ALU/LD/LDX). Jumps, calls, EXIT and atomics are handled by
 		// maybeSnapshot() calls placed at their emission sites above.
@@ -2220,4 +2249,3 @@ According to eBPF docs, it should actually be sign-extended to
 
 	return ThreadSafeModule(std::move(jitModule), std::move(context));
 }
-
