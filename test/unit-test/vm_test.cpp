@@ -648,6 +648,81 @@ TEST_CASE("Test compileWithSS resumes with live local-call stacks")
 	REQUIRE((*func)(sizeof(heap), &state) == 9);
 }
 
+TEST_CASE("Test compileWithSS2 snapshots one specified loop iteration")
+{
+	// The iterator structure starts at r10-32. Its curr field is at
+	// r10-8. The loop visits curr values 0, 1, and 2.
+	std::vector<ebpf_inst> insts = {
+		{ EBPF_OP_MOV64_IMM, BPF_REG_0, 0, 0, 0 },
+		{ EBPF_OP_MOV64_IMM, BPF_REG_1, 0, 0, 0 },
+		{ EBPF_OP_STXDW, BPF_REG_10, BPF_REG_1, -8, 0 },
+		{ EBPF_OP_ADD64_IMM, BPF_REG_0, 0, 0, 1 },
+		{ EBPF_OP_ADD64_IMM, BPF_REG_1, 0, 0, 1 },
+		{ EBPF_OP_STXDW, BPF_REG_10, BPF_REG_1, -8, 0 },
+		{ EBPF_OP_JLT_IMM, BPF_REG_1, 0, -4, 3 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+	};
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.load_code(insts.data(), insts.size() * sizeof(ebpf_inst)) == 0);
+
+	constexpr uint16_t frameSize = 128;
+	bpftime::ExecState state{};
+	uint8_t dataStack[frameSize] = {};
+	void *callStack[5] = {};
+	state.dataStack = reinterpret_cast<std::byte *>(dataStack);
+	state.callStack = reinterpret_cast<std::byte *>(callStack);
+	const std::vector<bpftime::TimeLoc> locations{
+		{ 3, { { -32, 1 } } },
+	};
+	auto func = vm.compileWithSS2(&state, 1, frameSize, locations);
+	REQUIRE(func);
+
+	REQUIRE((*func)(999, nullptr) == 3);
+	REQUIRE(state.pc == 4);
+	REQUIRE(state.normRegs[0] == 2);
+	REQUIRE(state.normRegs[1] == 1);
+	REQUIRE(state.dataStackOffset == frameSize);
+	REQUIRE(state.callStackSize == 0);
+	uint64_t curr = 0;
+	std::memcpy(&curr, dataStack + frameSize - 8, sizeof(curr));
+	REQUIRE(curr == 1);
+
+	// Resume at the instruction after the snapshot. The restored loop must
+	// finish with the same result.
+	const auto resumed = (*func)(0, &state);
+	CAPTURE(resumed, state.normRegs[0], state.normRegs[1], state.pc);
+	REQUIRE(resumed == 3);
+}
+
+TEST_CASE("Test compileWithSS2 skips a different loop iteration")
+{
+	std::vector<ebpf_inst> insts = {
+		{ EBPF_OP_MOV64_IMM, BPF_REG_0, 0, 0, 7 },
+		{ EBPF_OP_MOV64_IMM, BPF_REG_1, 0, 0, 1 },
+		{ EBPF_OP_STXDW, BPF_REG_10, BPF_REG_1, -8, 0 },
+		{ EBPF_OP_ADD64_IMM, BPF_REG_0, 0, 0, 2 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+	};
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.load_code(insts.data(), insts.size() * sizeof(ebpf_inst)) == 0);
+
+	constexpr uint16_t frameSize = 128;
+	bpftime::ExecState state{};
+	uint8_t dataStack[frameSize] = {};
+	void *callStack[5] = {};
+	state.normRegs[0] = 55;
+	state.pc = 44;
+	state.dataStack = reinterpret_cast<std::byte *>(dataStack);
+	state.callStack = reinterpret_cast<std::byte *>(callStack);
+	const bpftime::TimeLoc locations[] = { { 3, { { -32, 9 } } } };
+	auto func = vm.compileWithSS2(&state, 1, frameSize,
+				      std::begin(locations), std::end(locations));
+	REQUIRE(func);
+	REQUIRE((*func)(0, nullptr) == 9);
+	REQUIRE(state.normRegs[0] == 55);
+	REQUIRE(state.pc == 44);
+}
+
 TEST_CASE("Test external function registration")
 {
 	bpftime::llvmbpf_vm vm;

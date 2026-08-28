@@ -27,6 +27,16 @@ struct ExecState{
 	uint16_t callStackSize=0;//raw `callItemCnt`: number of call stack slots in use. `callStack` holds `callStackSize*sizeof(void*)` bytes. To restore: `callItemCnt=callStackSize`.
 	uint16_t pc;//index of immediately next eBPF instruction after the snapshot that produced the current version of `ExecState`.
 };
+struct TimeLoc{//a struct describing the time and spatial location of an eBPF instruction.
+	uint16_t pc;//index of eBPF instruction.
+
+	//An instruction maybe inside a loop, so to describe its location in time, we need to describe which loop and which iteration.
+	struct LoopTime{
+		int16_t loc;//offset of `bpf_iter_num` defined in "/home/cw3723/bpf-prime/tests/bpf_shim.h" relative to r10 (we assume it's on data stack).
+		long long v;//value of `bpf_iter_num::curr` that the current location is at. Note that you still need to calculate offset of this field from `loc`, as `loc` is base addr of the struct.
+	};
+	std::vector<LoopTime> time;//when nested in many loops, there would be multiple LoopTime.
+};
 class llvm_bpf_jit_context;
 
 // The JITed function signature.
@@ -130,6 +140,32 @@ class llvmbpf_vm {
 	when provided, ignored when `nullptr`. When using `snapshot` to resume, copy the approriate values into `store` (since pointers in `store` are treated as compile time constants).
 	*/
 	std::optional<precompiled_ebpf_function> compileWithSS1(const ExecState* store,uint8_t maxFuncNestDepth,uint16_t frameSize,uint16_t heapSize)noexcept;
+
+	/*
+	Mostly similar to `compileWithSS`, but adds snapshot at locations described by `at`. If instruction is conditional branch, add snapshot immediately before it (to avoid adding them twice at each target). If
+	it's modifing (register or memory), add snapshots immediately after it. If it's everything else, like non-conditional jumps, it doesn't matter whether snapshot
+	is immediately before or after it. If I'm correct, this is the same as `compileWithSS`.
+
+	If the specified location also has iteration descriptor (`at[i].time.size()>0`), only perform the snapshot at the particular iteration described. You would need
+	to add 1 or more conditional branches (if statements) in LLVM IR to check for the exact iteration conditions. Note that adding these
+	branches in eBPF may break jump offsets in eBPF. Quite like the resuming jump instrumentation emitted at start of program, you need to
+	figure out approriate locations of eBPF instructions in LLVM IR. The goal of iteration descriptor is to make sure snapshots are only
+	run once at particular time in execution, not on every iteration.
+
+	Since there's no `CompInfo`, at each snapshot, you would need to store registers, active region of call and data stack, pc, and stack size descriptors (offsets) into `store`.
+	Again, you may treat pointers in `store` as compile time constants. Ignore heap memory, the jitted programs won't use them and won't be provided of any heap ("/home/cw3723/bpf-prime/Components/BpfSequencer/bpfwrappers.cpp").
+
+	Resuming mechanics should be same with `compileWithSS`. Basically, copying the data from provided `ExecState` at program start back into
+	the allocated storages and jumping to desired PC.
+	*/
+	/*
+	Don't overload "src/compiler.cpp" with more features/functions, put the "generateModule" of this function in "src/compiler_ss2.cpp".
+	Like `compileWithSS1`, some features in "src/compiler.cpp" don't need to be supported. These arguments are
+	always set to the values described here `main_func_with_arguments=true` and `is_gpu=false`.
+	*/
+	std::optional<precompiled_ebpf_function> compileWithSS2(const ExecState* store,uint8_t maxFuncNestDepth,uint16_t frameSize,const std::vector<TimeLoc>& at)noexcept;
+	//An overload supporting arrays.
+	std::optional<precompiled_ebpf_function> compileWithSS2(const ExecState* store,uint8_t maxFuncNestDepth,uint16_t frameSize,const TimeLoc* begin,const TimeLoc* end)noexcept;
 
 	// See the spec for details.
 	// If the code involve array map access, the map_val function

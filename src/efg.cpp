@@ -1266,23 +1266,6 @@ double interpolatedQuantile(const std::vector<uint16_t> &sorted, double p)
 }
 
 } // namespace
-/*
-Computing longest trail is a NP problem in general. However, you should take full advantage of unique properties of the graph here.
-Here are some of my insights, but they may be wrong.
-(1) The graph is directed, so not all pairs of vertices can reach each other. Also, since `partition*` splits graph into weakly connect component, trails that don't cross
-boundary vertices in the middle shouldn't be very long; they should "generally be living inside each component" (but remember, don't remove edges for trail computation).
-(2) The goal of using trail instead of path is to handle the following case. Suppose there's a loop `1->{2,100}->3, 100->101->{2,100}`.
-I want [1,2,100,101,2,3] instead of [1,2,3]. In other words, go around the loop once; or, equivalently, don't shrink loops.
-(3) This function will be applied to eBPF programs in "/home/cw3723/bpf-prime/tests/". Notice that none of them uses local eBPF functions.
-Therefore, the max out degree of any vertex is at most 2 (conditional jumps). In fact, I expect the average out degree to be close to 1. Also,
-if you inspect, these programs don't have many eBPF instructions to begin with. The max number of instructions, as I recall, is around 25000.
-(4) The eBPF programs are assumed to terminate, so, starting from entry instruction, walks are only valid if it can reach the last `exit`.
-The trails I'm interested in should be part of one such walks.
-(5) Since these are eBPF programs, you might be able to do some control flow analysis to massively shrink the graph size. Since within
-each control flow block the execution flow is fixed.
-(6) This is really a helper function. It's not use in the jit compilation and execution pipeline. Therefore, you are allowed to use
-parallization.
-*/
 EFGStat metrics(const G_t G, const std::vector<ebpf_inst> &instructions,
 		const std::unordered_map<uint16_t, CompInfo> &boundary) noexcept
 {

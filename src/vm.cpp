@@ -213,6 +213,78 @@ std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compileWithSS1(
 	}
 }
 
+std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compileWithSS2(
+	const ExecState *store, uint8_t maxFuncNestDepth, uint16_t frameSize,
+	const std::vector<TimeLoc> &at) noexcept
+{
+	if (jitted_function) {
+		error_msg = "Already compiled";
+		return jitted_function;
+	}
+	if (!store) {
+		error_msg = "ExecState store must not be null";
+		return {};
+	}
+	if (maxFuncNestDepth == 0 || frameSize == 0) {
+		error_msg = "Stack dimensions must not be zero";
+		return {};
+	}
+	if (!store->dataStack || !store->callStack) {
+		error_msg = "ExecState stack pointers must not be null";
+		return {};
+	}
+	for (const auto &location : at) {
+		if (location.pc >= instructions.size() ||
+		    (location.pc > 0 &&
+		     instructions[location.pc - 1].opcode == EBPF_OP_LDDW)) {
+			error_msg = "Snapshot PC is not an executable instruction";
+			return {};
+		}
+		for (const auto &loop : location.time) {
+			if (loop.loc > -32 ||
+			    loop.loc < -static_cast<int32_t>(frameSize)) {
+				error_msg = "Loop iterator is outside the current stack frame";
+				return {};
+			}
+		}
+	}
+	try {
+		auto res = jit_ctx->do_jit_compile_with_ss2(
+			maxFuncNestDepth, frameSize,
+			reinterpret_cast<uintptr_t>(store), at);
+		if (res) {
+			LLVMErrorRef llvmError = llvm::wrap(std::move(res));
+			error_msg = LLVMGetErrorMessage(llvmError);
+			SPDLOG_ERROR("LLVM-JIT: failed to compile: {}", error_msg);
+			return {};
+		}
+		auto func = jit_ctx->get_entry_address();
+		compiled_max_func_nest_depth = maxFuncNestDepth;
+		compiled_frame_size = frameSize;
+		jitted_function = func;
+		return func;
+	} catch (const std::exception &e) {
+		error_msg = e.what();
+		jitted_function = std::nullopt;
+		return {};
+	}
+}
+
+std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compileWithSS2(
+	const ExecState *store, uint8_t maxFuncNestDepth, uint16_t frameSize,
+	const TimeLoc *begin, const TimeLoc *end) noexcept
+{
+	if (!begin && !end)
+		return compileWithSS2(store, maxFuncNestDepth, frameSize,
+				      std::vector<TimeLoc>{});
+	if (!begin || !end || end < begin) {
+		error_msg = "Invalid snapshot location range";
+		return {};
+	}
+	return compileWithSS2(store, maxFuncNestDepth, frameSize,
+			      std::vector<TimeLoc>(begin, end));
+}
+
 void llvmbpf_vm::set_lddw_helpers(uint64_t (*map_by_fd)(uint32_t),
 				  uint64_t (*map_by_idx)(uint32_t),
 				  uint64_t (*map_val)(uint64_t),
