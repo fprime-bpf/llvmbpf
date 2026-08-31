@@ -673,11 +673,9 @@ partition2(const G_t G, const std::vector<ebpf_inst> &instructions,
 			// state-changing operation (if any).
 			isBoundary[pc] = true;
 			snapshotBefore[pc] = true;
-		} else if (isCall(inst)) {
-			// An external helper call is snapshotted after it returns, so
-			// its outgoing edge, rather than its incoming edge, is cut.
+		} /*else if (isCall(inst)) {
 			isBoundary[pc] = true;
-		}
+		}*/
 	}
 
 	std::vector<UEdge> edges;

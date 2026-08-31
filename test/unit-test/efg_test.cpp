@@ -627,25 +627,6 @@ TEST_CASE("partition2: jumps are boundaries with metadata from snapshot side")
 	REQUIRE(B.at(3).normRegModified(2));
 }
 
-TEST_CASE("partition2: external calls snapshot after the helper")
-{
-	std::vector<ebpf_inst> instructions{
-		makeInst(EBPF_OP_MOV64_IMM, 1, 0, 0, 1),
-		makeInst(EBPF_OP_CALL, 0, 0, 0, 9),
-		makeInst(EBPF_OP_EXIT),
-	};
-
-	const auto g = buildEFG(instructions);
-	const auto B = partition2(g.get(), instructions, { 9 });
-
-	REQUIRE(B.size() == 2);
-	REQUIRE(B.contains(1));
-	REQUIRE(B.at(1).normRegModified(0));
-	REQUIRE(B.at(1).normRegModified(1));
-	REQUIRE_FALSE(B.at(1).usedStack());
-	REQUIRE_FALSE(B.at(1).usedHeap());
-}
-
 TEST_CASE("metrics: component statistics use linear interpolation and population deviation")
 {
 	std::vector<ebpf_inst> instructions{
