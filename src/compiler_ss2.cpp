@@ -94,7 +94,8 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS2Core(
 	const std::string &func_name, bool is_gpu,
 	const std::unordered_map<uint16_t, CompInfo> *instInfo,
 	uintptr_t register_state_store_addr,
-	const std::vector<TimeLoc> *snapshot_locations)
+	const std::vector<TimeLoc> *snapshot_locations,
+	const std::vector<uint16_t> *extra_resume_pcs)
 {
 	const uint32_t dataStackSize =
 		static_cast<uint32_t>(frameSize) * maxFuncNestDepth;
@@ -254,6 +255,14 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS2Core(
 			}
 		}
 	}
+	if (extra_resume_pcs) {
+		for (uint16_t pc : *extra_resume_pcs) {
+			if (pc >= insts.size())
+				continue;
+			resumeTargets.insert(pc);
+			blockBegin[pc] = true;
+		}
+	}
 	for (uint16_t i = 0; i < insts.size(); i++) {
 		auto curr = insts[i];
 		SPDLOG_TRACE("check pc {} opcode={} ", i,
@@ -355,7 +364,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS2Core(
 				builder.CreateStore(
 					builder.CreateSelect(
 						hasInputSnapshot, snapshotValue,
-						UndefValue::get(builder.getInt64Ty())),
+						builder.getInt64(0)),
 					localReg);
 			}
 			auto *localFreg = builder.CreateAlloca(
@@ -370,7 +379,7 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS2Core(
 				builder.CreateStore(
 					builder.CreateSelect(
 						hasInputSnapshot, snapshotValue,
-						UndefValue::get(builder.getFloatTy())),
+						ConstantFP::get(builder.getFloatTy(), 0.0)),
 					localFreg);
 			}
 		}
@@ -390,6 +399,10 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS2Core(
 				builder.getInt8Ty(),
 				builder.getInt32(dataStackSize), "stackBegin");
 		}
+		// Snapshotting copies the complete active frame. Clear bytes that the
+		// program does not write so repeated snapshots are deterministic.
+		builder.CreateMemSet(stackBegin, builder.getInt8(0),
+				     builder.getInt64(dataStackSize), MaybeAlign(1));
 		if (inputSnapshot) {
 			auto *snapshotStack = builder.CreateLoad(
 				builder.getPtrTy(), inputField(offsetof(ExecState, dataStack),
@@ -440,6 +453,11 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS2Core(
 				builder.getPtrTy(),
 				builder.getInt32(callStackSize), "callStack");
 		}
+		// Initialize unused slots. Snapshot conversion is unrolled for the
+		// maximum depth, including frames that are not active.
+		builder.CreateMemSet(callStack, builder.getInt8(0),
+				     builder.getInt64(callStackSize * sizeof(void *)),
+				     MaybeAlign(alignof(void *)));
 		if (inputSnapshot) {
 			auto *snapshotCallStack = builder.CreateLoad(
 				builder.getPtrTy(), inputField(offsetof(ExecState, callStack),
@@ -468,6 +486,34 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS2Core(
 		if (inputSnapshot)
 			initialCallCount = restoredCallStackCount;
 		builder.CreateStore(initialCallCount, callItemCnt);
+		if (inputSnapshot) {
+			// Values in r0-r9 that point into the snapshot data stack must
+			// point into this invocation's local data stack after restore.
+			auto *snapshotStack = builder.CreateLoad(
+				builder.getPtrTy(), inputField(offsetof(ExecState, dataStack),
+							 builder.getPtrTy()));
+			auto *snapshotBegin = builder.CreatePtrToInt(
+				snapshotStack, builder.getInt64Ty());
+			auto *snapshotEnd = builder.CreateAdd(
+				snapshotBegin, builder.getInt64(dataStackSize));
+			auto *localBegin = builder.CreateSub(
+				builder.CreatePtrToInt(stackEnd, builder.getInt64Ty()),
+				builder.getInt64(dataStackSize));
+			for (unsigned reg = 0; reg < 10; ++reg) {
+				auto *value = builder.CreateLoad(builder.getInt64Ty(),
+							 regs[reg]);
+				auto *inStack = builder.CreateAnd(
+					hasInputSnapshot,
+					builder.CreateAnd(
+						builder.CreateICmpUGE(value, snapshotBegin),
+						builder.CreateICmpULE(value, snapshotEnd)));
+				auto *rebased = builder.CreateAdd(
+					localBegin, builder.CreateSub(value, snapshotBegin));
+				builder.CreateStore(builder.CreateSelect(inStack, rebased,
+								 value),
+						    regs[reg]);
+			}
+		}
 		if (main_func_with_arguments) {
 			llvm::Value *mem = is_gpu ? bpf_func->getArg(0) : nullptr;
 			llvm::Value *mem_len = is_gpu ? bpf_func->getArg(1) :
@@ -548,6 +594,64 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS2Core(
 	}
 	{
 		IRBuilder<> builder(setupBlock);
+		if (inputSnapshot && snapshot_locations) {
+			// The serialized call stack contains eBPF return PCs, not
+			// process-specific LLVM block addresses. Convert the active
+			// return slots before local-function return uses them. Also
+			// rebase saved r6-r9 values that point into the data stack.
+			auto inputField = [&](size_t off, Type *ty) -> Value * {
+				auto *addr = builder.CreateGEP(builder.getInt8Ty(),
+							   safeInputSnapshot,
+							   builder.getInt64(off));
+				return builder.CreatePointerCast(addr,
+							 ty->getPointerTo());
+			};
+			auto *snapshotStack = builder.CreateLoad(
+				builder.getPtrTy(), inputField(offsetof(ExecState, dataStack),
+							 builder.getPtrTy()));
+			auto *snapshotBegin = builder.CreatePtrToInt(
+				snapshotStack, builder.getInt64Ty());
+			auto *snapshotEnd = builder.CreateAdd(
+				snapshotBegin, builder.getInt64(dataStackSize));
+			auto *localBegin = builder.CreateSub(
+				builder.CreatePtrToInt(stackEnd, builder.getInt64Ty()),
+				builder.getInt64(dataStackSize));
+			for (uint32_t frame = 0; frame < maxFuncNestDepth; ++frame) {
+				const uint32_t frameBase = frame * 5;
+				for (uint32_t slot = 0; slot < 4; ++slot) {
+					auto *addr = builder.CreateGEP(
+						builder.getInt64Ty(), callStack,
+						{ builder.getInt32(frameBase + slot) });
+					auto *value = builder.CreateLoad(
+						builder.getInt64Ty(), addr);
+					auto *inStack = builder.CreateAnd(
+						builder.CreateICmpUGE(value, snapshotBegin),
+						builder.CreateICmpULE(value, snapshotEnd));
+					auto *rebased = builder.CreateAdd(
+						localBegin,
+						builder.CreateSub(value, snapshotBegin));
+					builder.CreateStore(builder.CreateSelect(
+								inStack, rebased, value),
+							    addr);
+				}
+
+				auto *returnSlot = builder.CreateGEP(
+					builder.getPtrTy(), callStack,
+					{ builder.getInt32(frameBase + 4) });
+				auto *returnPc = builder.CreatePtrToInt(
+					builder.CreateLoad(builder.getPtrTy(), returnSlot),
+					builder.getInt64Ty());
+				Value *nativeAddress =
+					ConstantPointerNull::get(builder.getPtrTy());
+				for (const auto &[pc, blockAddress] : localFuncRetBlks) {
+					nativeAddress = builder.CreateSelect(
+						builder.CreateICmpEQ(returnPc,
+								     builder.getInt64(pc)),
+						blockAddress, nativeAddress);
+				}
+				builder.CreateStore(nativeAddress, returnSlot);
+			}
+		}
 		if (inputSnapshot) {
 			auto *pcAddr = builder.CreateGEP(
 				builder.getInt8Ty(), safeInputSnapshot,
@@ -659,8 +763,24 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS2Core(
 			auto *slot = builder.CreateGEP(
 				builder.getInt64Ty(), registerStateStoreBase,
 				{ builder.getInt64(reg) });
-			builder.CreateStore(
-				builder.CreateLoad(builder.getInt64Ty(), regs[reg]), slot);
+			Value *value = builder.CreateLoad(builder.getInt64Ty(), regs[reg]);
+			if (snapshot_locations && dataStackSnapshotDst) {
+				auto *localBegin = builder.CreateSub(
+					builder.CreatePtrToInt(stackEnd,
+							       builder.getInt64Ty()),
+					builder.getInt64(dataStackSize));
+				auto *localEnd = builder.CreatePtrToInt(
+					stackEnd, builder.getInt64Ty());
+				auto *inStack = builder.CreateAnd(
+					builder.CreateICmpUGE(value, localBegin),
+					builder.CreateICmpULE(value, localEnd));
+				auto *snapshotBegin = builder.CreatePtrToInt(
+					dataStackSnapshotDst, builder.getInt64Ty());
+				auto *rebased = builder.CreateAdd(
+					snapshotBegin, builder.CreateSub(value, localBegin));
+				value = builder.CreateSelect(inStack, rebased, value);
+			}
+			builder.CreateStore(value, slot);
 		}
 	};
 	// Emits stores of the given FPU (fpu0-fpu10) registers into the
@@ -738,6 +858,56 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS2Core(
 					     MaybeAlign(alignof(void *)),
 					     callStack,
 					     MaybeAlign(alignof(void *)), bytes);
+			if (snapshot_locations) {
+				auto *localBegin = builder.CreateSub(
+					builder.CreatePtrToInt(stackEnd,
+							       builder.getInt64Ty()),
+					builder.getInt64(dataStackSize));
+				auto *localEnd = builder.CreatePtrToInt(
+					stackEnd, builder.getInt64Ty());
+				auto *snapshotBegin = builder.CreatePtrToInt(
+					dataStackSnapshotDst, builder.getInt64Ty());
+				for (uint32_t frame = 0; frame < maxFuncNestDepth;
+				     ++frame) {
+					const uint32_t frameBase = frame * 5;
+					for (uint32_t slot = 0; slot < 4; ++slot) {
+						auto *source = builder.CreateGEP(
+							builder.getInt64Ty(), callStack,
+							{ builder.getInt32(frameBase + slot) });
+						auto *value = builder.CreateLoad(
+							builder.getInt64Ty(), source);
+						auto *inStack = builder.CreateAnd(
+							builder.CreateICmpUGE(value, localBegin),
+							builder.CreateICmpULE(value, localEnd));
+						auto *rebased = builder.CreateAdd(
+							snapshotBegin,
+							builder.CreateSub(value, localBegin));
+						auto *destination = builder.CreateGEP(
+							builder.getInt64Ty(), callStackSnapshotDst,
+							{ builder.getInt32(frameBase + slot) });
+						builder.CreateStore(builder.CreateSelect(
+							inStack, rebased, value), destination);
+					}
+					auto *nativeReturnSlot = builder.CreateGEP(
+						builder.getPtrTy(), callStack,
+						{ builder.getInt32(frameBase + 4) });
+					auto *nativeReturn = builder.CreateLoad(
+						builder.getPtrTy(), nativeReturnSlot);
+					Value *portablePc = builder.getInt64(0);
+					for (const auto &[pc, blockAddress] :
+					     localFuncRetBlks) {
+						portablePc = builder.CreateSelect(
+							builder.CreateICmpEQ(nativeReturn,
+									     blockAddress),
+							builder.getInt64(pc), portablePc);
+					}
+					auto *portableReturnSlot = builder.CreateGEP(
+						builder.getInt64Ty(), callStackSnapshotDst,
+						{ builder.getInt32(frameBase + 4) });
+					builder.CreateStore(portablePc,
+							    portableReturnSlot);
+				}
+			}
 		}
 	};
 	// If `pc` is listed in `instInfo`, snapshot the registers marked
@@ -2127,7 +2297,8 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS2(
 	const std::vector<std::string> &lddwHelpers,
 	bool patch_map_val_at_compile_time,
 	uintptr_t register_state_store_addr,
-	const std::vector<TimeLoc> &snapshot_locations)
+	const std::vector<TimeLoc> &snapshot_locations,
+	const std::vector<uint16_t> &extra_resume_pcs)
 {
 	std::unordered_map<uint16_t, CompInfo> snapshot_info;
 	for (const auto &location : snapshot_locations) {
@@ -2142,5 +2313,5 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS2(
 					 patch_map_val_at_compile_time, true,
 					 "bpf_main", false, &snapshot_info,
 					 register_state_store_addr,
-					 &snapshot_locations);
+					 &snapshot_locations, &extra_resume_pcs);
 }

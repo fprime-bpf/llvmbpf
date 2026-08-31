@@ -24,7 +24,7 @@ struct ExecState{
 	std::byte *heap, *dataStack, *callStack;//set before `compileWithSS`; their values are embedded in the jitted program and their buffers must remain valid until execution is done. user should ensure they've sufficient size.
 	float fpuRegs[11];//fpu0-10.
 	uint32_t dataStackOffset=0;//`stackEnd-(r10-frameSize)`: how many bytes of data stack are in use, including the frame currently being written. `frameSize` on entry, grows by frameSize per nested call. Live bytes occupy the end of the `frameSize*maxFuncNestDepth`-byte `dataStack` buffer. To restore: `r10=stackEnd-dataStackOffset+frameSize`.
-	uint16_t callStackSize=0;//raw `callItemCnt`: number of call stack slots in use. `callStack` holds `callStackSize*sizeof(void*)` bytes. To restore: `callItemCnt=callStackSize`.
+	uint16_t callStackSize=0;//raw `callItemCnt`: number of call stack slots in use. In compileWithSS2 snapshots, each five-slot frame contains saved r9, r8, r7, r6, then the eBPF return PC encoded as a pointer-sized integer. `callStack` holds `callStackSize*sizeof(void*)` bytes. To restore: `callItemCnt=callStackSize`.
 	uint16_t pc;//index of immediately next eBPF instruction after the snapshot that produced the current version of `ExecState`.
 };
 struct TimeLoc{//a struct describing the time and spatial location of an eBPF instruction.
@@ -164,6 +164,9 @@ class llvmbpf_vm {
 	always set to the values described here `main_func_with_arguments=true` and `is_gpu=false`.
 	*/
 	std::optional<precompiled_ebpf_function> compileWithSS2(const ExecState* store,uint8_t maxFuncNestDepth,uint16_t frameSize,const std::vector<TimeLoc>& at)noexcept;
+	// Add direct resume targets without adding snapshot instrumentation at
+	// those instructions.
+	std::optional<precompiled_ebpf_function> compileWithSS2(const ExecState* store,uint8_t maxFuncNestDepth,uint16_t frameSize,const std::vector<TimeLoc>& at,const std::vector<uint16_t>& extraResumePcs)noexcept;
 	//An overload supporting arrays.
 	std::optional<precompiled_ebpf_function> compileWithSS2(const ExecState* store,uint8_t maxFuncNestDepth,uint16_t frameSize,const TimeLoc* begin,const TimeLoc* end)noexcept;
 

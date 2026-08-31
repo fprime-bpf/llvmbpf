@@ -723,6 +723,120 @@ TEST_CASE("Test compileWithSS2 skips a different loop iteration")
 	REQUIRE(state.pc == 44);
 }
 
+TEST_CASE("Test compileWithSS2 uses portable local-call snapshots")
+{
+	// The caller keeps a data-stack pointer in r6 and values in r7-r9.
+	// The callee snapshot must store an eBPF return PC, not a JIT address.
+	std::vector<ebpf_inst> insts = {
+		{ EBPF_OP_MOV64_REG, BPF_REG_6, BPF_REG_10, 0, 0 },
+		{ EBPF_OP_MOV64_IMM, BPF_REG_7, 0, 0, 7 },
+		{ EBPF_OP_MOV64_IMM, BPF_REG_8, 0, 0, 8 },
+		{ EBPF_OP_MOV64_IMM, BPF_REG_9, 0, 0, 9 },
+		{ EBPF_OP_CALL, 0, 0x01, 0, 6 },
+		{ EBPF_OP_MOV64_REG, BPF_REG_0, BPF_REG_6, 0, 0 },
+		{ EBPF_OP_SUB64_REG, BPF_REG_0, BPF_REG_10, 0, 0 },
+		{ EBPF_OP_ADD64_REG, BPF_REG_0, BPF_REG_7, 0, 0 },
+		{ EBPF_OP_ADD64_REG, BPF_REG_0, BPF_REG_8, 0, 0 },
+		{ EBPF_OP_ADD64_REG, BPF_REG_0, BPF_REG_9, 0, 0 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+		{ EBPF_OP_MOV64_IMM, BPF_REG_0, 0, 0, 1 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+	};
+	bpftime::llvmbpf_vm vm;
+	REQUIRE(vm.load_code(insts.data(), insts.size() * sizeof(ebpf_inst)) == 0);
+
+	constexpr uint16_t frameSize = 128;
+	constexpr uint8_t maxDepth = 3;
+	bpftime::ExecState state{};
+	uint8_t dataStack[frameSize * maxDepth] = {};
+	uintptr_t callStack[5 * maxDepth] = {};
+	state.dataStack = reinterpret_cast<std::byte *>(dataStack);
+	state.callStack = reinterpret_cast<std::byte *>(callStack);
+	auto func = vm.compileWithSS2(
+		&state, maxDepth, frameSize,
+		std::vector<bpftime::TimeLoc>{ { 11, {} } });
+	REQUIRE(func);
+
+	REQUIRE((*func)(0, nullptr) == 24);
+	REQUIRE(state.pc == 12);
+	REQUIRE(state.callStackSize == 5);
+	REQUIRE(callStack[0] == 9);
+	REQUIRE(callStack[1] == 8);
+	REQUIRE(callStack[2] == 7);
+	REQUIRE(callStack[3] == reinterpret_cast<uintptr_t>(dataStack) +
+				      sizeof(dataStack));
+	REQUIRE(callStack[4] == 5);
+	REQUIRE(state.normRegs[6] == reinterpret_cast<uintptr_t>(dataStack) +
+					 sizeof(dataStack));
+
+	// The local return must use the saved r6-r9 values. It must also
+	// convert the stored data-stack pointer and return PC to this JIT run.
+	for (unsigned reg = 6; reg <= 9; ++reg)
+		state.normRegs[reg] = 0;
+	REQUIRE((*func)(0, &state) == 24);
+}
+
+TEST_CASE("Test compileWithSS2 accepts direct resume targets")
+{
+	std::vector<ebpf_inst> insts = {
+		{ EBPF_OP_MOV64_IMM, BPF_REG_0, 0, 0, 10 },
+		{ EBPF_OP_ADD64_IMM, BPF_REG_0, 0, 0, 1 },
+		{ EBPF_OP_ADD64_IMM, BPF_REG_0, 0, 0, 2 },
+		{ EBPF_OP_ADD64_IMM, BPF_REG_0, 0, 0, 4 },
+		{ EBPF_OP_EXIT, 0, 0, 0, 0 },
+	};
+	constexpr uint16_t frameSize = 128;
+
+	bpftime::ExecState earlier{};
+	uint8_t earlierDataStack[frameSize] = {};
+	uintptr_t earlierCallStack[5] = {};
+	earlier.dataStack = reinterpret_cast<std::byte *>(earlierDataStack);
+	earlier.callStack = reinterpret_cast<std::byte *>(earlierCallStack);
+	bpftime::llvmbpf_vm earlierVm;
+	REQUIRE(earlierVm.load_code(insts.data(),
+				    insts.size() * sizeof(ebpf_inst)) == 0);
+	auto earlierFunc = earlierVm.compileWithSS2(
+		&earlier, 1, frameSize,
+		std::vector<bpftime::TimeLoc>{ { 1, {} } });
+	REQUIRE(earlierFunc);
+	REQUIRE((*earlierFunc)(0, nullptr) == 17);
+	REQUIRE(earlier.pc == 2);
+	REQUIRE(earlier.normRegs[0] == 11);
+
+	bpftime::ExecState later{};
+	uint8_t laterDataStack[frameSize] = {};
+	uintptr_t laterCallStack[5] = {};
+	later.dataStack = reinterpret_cast<std::byte *>(laterDataStack);
+	later.callStack = reinterpret_cast<std::byte *>(laterCallStack);
+	bpftime::llvmbpf_vm laterVm;
+	REQUIRE(laterVm.load_code(insts.data(),
+				  insts.size() * sizeof(ebpf_inst)) == 0);
+	auto laterFunc = laterVm.compileWithSS2(
+		&later, 1, frameSize,
+		std::vector<bpftime::TimeLoc>{ { 3, {} } }, { earlier.pc });
+	REQUIRE(laterFunc);
+	REQUIRE((*laterFunc)(0, &earlier) == 17);
+	REQUIRE(later.pc == 4);
+	REQUIRE(later.normRegs[0] == 17);
+
+	bpftime::ExecState invalidState{};
+	uint8_t invalidDataStack[frameSize] = {};
+	uintptr_t invalidCallStack[5] = {};
+	invalidState.dataStack =
+		reinterpret_cast<std::byte *>(invalidDataStack);
+	invalidState.callStack =
+		reinterpret_cast<std::byte *>(invalidCallStack);
+	bpftime::llvmbpf_vm invalidVm;
+	REQUIRE(invalidVm.load_code(insts.data(),
+				    insts.size() * sizeof(ebpf_inst)) == 0);
+	REQUIRE_FALSE(invalidVm.compileWithSS2(
+		&invalidState, 1, frameSize,
+		std::vector<bpftime::TimeLoc>{ { 3, {} } },
+		{ static_cast<uint16_t>(insts.size()) }));
+	REQUIRE(invalidVm.get_error_message() ==
+		"Resume PC is not an executable instruction");
+}
+
 TEST_CASE("Test external function registration")
 {
 	bpftime::llvmbpf_vm vm;

@@ -356,7 +356,8 @@ llvm::Error llvm_bpf_jit_context::do_jit_compile_with_ss1(
 llvm::Error llvm_bpf_jit_context::do_jit_compile_with_ss2(
 	uint8_t maxFuncNestDepth, uint16_t frameSize,
 	uintptr_t register_state_store_addr,
-	const std::vector<TimeLoc> &snapshot_locations)
+	const std::vector<TimeLoc> &snapshot_locations,
+	const std::vector<uint16_t> &extra_resume_pcs)
 {
 	spin_lock_guard guard(compiling.get());
 	auto [jit, extFuncNames, definedLddwHelpers] =
@@ -368,7 +369,8 @@ llvm::Error llvm_bpf_jit_context::do_jit_compile_with_ss2(
 	}
 	auto module = generateModuleWithSS2(
 		maxFuncNestDepth, frameSize, extFuncNames, definedLddwHelpers,
-		true, register_state_store_addr, snapshot_locations);
+		true, register_state_store_addr, snapshot_locations,
+		extra_resume_pcs);
 	if (!module)
 		return module.takeError();
 	module->withModuleDo([](auto &M) { optimizeModule(M); });

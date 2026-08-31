@@ -217,6 +217,14 @@ std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compileWithSS2(
 	const ExecState *store, uint8_t maxFuncNestDepth, uint16_t frameSize,
 	const std::vector<TimeLoc> &at) noexcept
 {
+	return compileWithSS2(store, maxFuncNestDepth, frameSize, at, {});
+}
+
+std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compileWithSS2(
+	const ExecState *store, uint8_t maxFuncNestDepth, uint16_t frameSize,
+	const std::vector<TimeLoc> &at,
+	const std::vector<uint16_t> &extraResumePcs) noexcept
+{
 	if (jitted_function) {
 		error_msg = "Already compiled";
 		return jitted_function;
@@ -248,10 +256,17 @@ std::optional<bpftime::precompiled_ebpf_function> llvmbpf_vm::compileWithSS2(
 			}
 		}
 	}
+	for (uint16_t pc : extraResumePcs) {
+		if (pc >= instructions.size() ||
+		    (pc > 0 && instructions[pc - 1].opcode == EBPF_OP_LDDW)) {
+			error_msg = "Resume PC is not an executable instruction";
+			return {};
+		}
+	}
 	try {
 		auto res = jit_ctx->do_jit_compile_with_ss2(
 			maxFuncNestDepth, frameSize,
-			reinterpret_cast<uintptr_t>(store), at);
+			reinterpret_cast<uintptr_t>(store), at, extraResumePcs);
 		if (res) {
 			LLVMErrorRef llvmError = llvm::wrap(std::move(res));
 			error_msg = LLVMGetErrorMessage(llvmError);

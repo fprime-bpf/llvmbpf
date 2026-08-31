@@ -46,7 +46,9 @@ bpftime_add_library(llvmbpf_vm
     src/vm.cpp
 )
 
-set_target_properties(llvmbpf_vm PROPERTIES ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/../")
+# Keep each configuration's archive in its own build tree.  Writing it next to
+# the sources makes host and cross-compilation builds overwrite one another.
+set_target_properties(llvmbpf_vm PROPERTIES ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 
 find_package(LLVM REQUIRED CONFIG)
 
@@ -195,6 +197,10 @@ if(BPFTIME_ENABLE_UNIT_TESTING)
 endif()
 
 add_subdirectory(example)
+
+bpftime_add_executable(llvmbpf-e2e src/e2e.cpp)
+add_dependencies(llvmbpf-e2e llvmbpf_vm spdlog::spdlog)
+target_link_libraries(llvmbpf-e2e PRIVATE llvmbpf_vm)
 
 
 option(LLVMBPF_ENABLE_PTX "Whether build the ptx demo program, which requires CUDA" OFF)

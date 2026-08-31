@@ -61,7 +61,8 @@ class llvm_bpf_jit_context {
 		const std::string &func_name, bool is_gpu,
 		const std::unordered_map<uint16_t, CompInfo> *instInfo,
 		uintptr_t register_state_store_addr,
-		const std::vector<TimeLoc> *snapshot_locations);
+		const std::vector<TimeLoc> *snapshot_locations,
+		const std::vector<uint16_t> *extra_resume_pcs);
 	llvm::Expected<llvm::orc::ThreadSafeModule> generateModuleWithSS1(
 		uint8_t maxFuncNestDepth, uint16_t frameSize,
 		const std::vector<std::string> &extFuncNames,
@@ -74,7 +75,8 @@ class llvm_bpf_jit_context {
 		const std::vector<std::string> &lddwHelpers,
 		bool patch_map_val_at_compile_time,
 		uintptr_t register_state_store_addr,
-		const std::vector<TimeLoc> &snapshot_locations);
+		const std::vector<TimeLoc> &snapshot_locations,
+		const std::vector<uint16_t> &extra_resume_pcs);
 	std::vector<uint8_t>
 	do_aot_compile(const std::vector<std::string> &extFuncNames,
 		       const std::vector<std::string> &lddwHelpers,
@@ -98,7 +100,8 @@ class llvm_bpf_jit_context {
 	llvm::Error do_jit_compile_with_ss2(
 		uint8_t maxFuncNestDepth, uint16_t frameSize,
 		uintptr_t register_state_store_addr,
-		const std::vector<TimeLoc> &snapshot_locations);
+		const std::vector<TimeLoc> &snapshot_locations,
+		const std::vector<uint16_t> &extra_resume_pcs);
 	llvm_bpf_jit_context(llvmbpf_vm &vm);
 	virtual ~llvm_bpf_jit_context();
 	precompiled_ebpf_function get_entry_address();
