@@ -26,6 +26,7 @@ struct ExecState{
 	uint32_t dataStackOffset=0;//`stackEnd-(r10-frameSize)`: how many bytes of data stack are in use, including the frame currently being written. `frameSize` on entry, grows by frameSize per nested call. Live bytes occupy the end of the `frameSize*maxFuncNestDepth`-byte `dataStack` buffer. To restore: `r10=stackEnd-dataStackOffset+frameSize`.
 	uint16_t callStackSize=0;//raw `callItemCnt`: number of call stack slots in use. In compileWithSS2 snapshots, each five-slot frame contains saved r9, r8, r7, r6, then the eBPF return PC encoded as a pointer-sized integer. `callStack` holds `callStackSize*sizeof(void*)` bytes. To restore: `callItemCnt=callStackSize`.
 	uint16_t pc;//index of immediately next eBPF instruction after the snapshot that produced the current version of `ExecState`.
+	uint64_t resumeCycles=0;//cycles used by compileWithSS2 to restore this state before resume dispatch.
 };
 struct TimeLoc{//a struct describing the time and spatial location of an eBPF instruction.
 	uint16_t pc;//index of eBPF instruction.

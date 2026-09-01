@@ -1,0 +1,59 @@
+The executable loads tests/<program>/a.o at runtime. It does not bundle the programs.
+
+### Native build and use
+
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target llvmbpf-e2e -j
+
+./build/llvmbpf-e2e CONFIG
+./build/llvmbpf-e2e CONFIG INPUT_SNAPSHOT
+
+Fresh execution writes state.bin. Resumed execution does not replace state.bin when no later snapshot changes the state.
+
+### RISC-V build
+
+cmake -S . -B build-riscv \
+-DCMAKE_TOOLCHAIN_FILE=/home/cw3723/bpf-prime/cmake/toolchain/riscv.cmake \
+-DLLVM_DIR=/home/cw3723/bpf-prime/cmake/toolchain/llvm-project/build/lib/cmake/llvm \
+-DFETCHCONTENT_SOURCE_DIR_SPDLOG="$PWD/build/_deps/spdlog-src" \
+-DCMAKE_BUILD_TYPE=Release \
+-DBPFTIME_ENABLE_UNIT_TESTING=OFF
+
+cmake --build build-riscv --target llvmbpf-e2e -j
+
+The direct QEMU rule on this machine does not supply the sysroot. This command works:
+
+qemu-riscv64 \
+-L /home/cw3723/bpf-prime/cmake/toolchain/riscv/sysroot \
+./build-riscv/llvmbpf-e2e CONFIG
+
+
+### select iteration for "tests/simple"
+At PC 24, after N completed loop iterations, calculate the matcher value as:
+
+  [
+  v_0 = 0x123456789abcdef0
+  ]
+  [
+  v_{i+1} = ((v_i \ll 7) \oplus (v_i \gg 3) \oplus i) \bmod 2^{64}
+  ]
+
+  Use v_N in e2e.yml:
+
+  - 24
+    - -32: <v_N>
+
+  For example:
+
+  python3 -c '
+  n = 100000
+  v = 0x123456789abcdef0
+  for i in range(n):
+      v = (((v << 7) & ((1 << 64) - 1)) ^ (v >> 3) ^ i) & ((1 << 64) - 1)
+  print(v)
+  '
+
+  For n = 100000, this prints 4361292759442323711.
+
+  Note: e2e.cpp parses this field as a signed long long; choose an N whose resulting value is at most 9223372036854775807, or
+  update the parser to accept unsigned 64-bit values.

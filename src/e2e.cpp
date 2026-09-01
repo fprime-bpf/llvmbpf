@@ -658,8 +658,10 @@ int run(int argc, char **argv)
 	std::cout << "program=" << program_path.string()
 		  << " return=" << return_value
 		  << " snapshot_pc=" << output.state.pc
-		  << " snapshot=" << (changed ? "written" : "unchanged")
-		  << '\n';
+		  << " snapshot=" << (changed ? "written" : "unchanged");
+	if (input)
+		std::cout << " resume_cycles=" << input->state.resumeCycles;
+	std::cout << '\n';
 	return 0;
 }
 } // namespace

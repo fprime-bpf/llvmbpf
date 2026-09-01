@@ -19,6 +19,7 @@
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Instruction.h>
+#include <llvm/IR/InlineAsm.h>
 #include <llvm/IR/Value.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/IR/Function.h>
@@ -38,6 +39,22 @@
 using namespace llvm;
 using namespace llvm::orc;
 using namespace bpftime;
+
+static Value *readCycleCounter(IRBuilder<> &builder)
+{
+	auto *type = FunctionType::get(builder.getInt64Ty(), false);
+#if defined(__x86_64__)
+	auto *instruction = InlineAsm::get(
+		type, "lfence; rdtsc; shl $$32, %rdx; or %rdx, %rax",
+		"={ax},~{rdx},~{dirflag},~{fpsr},~{flags}", true);
+#elif defined(__riscv)
+	auto *instruction = InlineAsm::get(
+		type, "fence rw, rw; rdcycle $0", "=r", true);
+#else
+#error "SS2 resume timing requires an x86-64 or RISC-V cycle counter"
+#endif
+	return builder.CreateCall(instruction);
+}
 
 /*
     How should we compile bpf instructions into a LLVM module?
@@ -320,10 +337,12 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS2Core(
 	Value *hasInputSnapshot = nullptr;
 	Value *safeInputSnapshot = nullptr;
 	Value *invalidResumePc = nullptr;
+	Value *resumeCycleStart = nullptr;
 	{
 		setupBlock = BasicBlock::Create(*context, "setupBlock", bpf_func);
 		allBlocks.push_back(setupBlock);
 		IRBuilder<> builder(setupBlock);
+		resumeCycleStart = readCycleCounter(builder);
 		// Create registers
 
 		if (main_func_with_arguments && !is_gpu)
@@ -660,6 +679,15 @@ Expected<ThreadSafeModule> llvm_bpf_jit_context::generateModuleWithSS2Core(
 				hasInputSnapshot,
 				builder.CreateLoad(builder.getInt16Ty(), pcAddr),
 				builder.getInt16(0));
+			auto *resumeCyclesAddr = builder.CreateGEP(
+				builder.getInt8Ty(), safeInputSnapshot,
+				builder.getInt64(offsetof(ExecState, resumeCycles)));
+			auto *resumeCyclesPtr = builder.CreatePointerCast(
+				resumeCyclesAddr, builder.getInt64Ty()->getPointerTo());
+			auto *resumeCycleEnd = readCycleCounter(builder);
+			builder.CreateStore(
+				builder.CreateSub(resumeCycleEnd, resumeCycleStart),
+				resumeCyclesPtr);
 			invalidResumePc = resumePc;
 			invalidResumePcBlock = BasicBlock::Create(
 				*context, "invalidResumePc", bpf_func);
